@@ -50,9 +50,12 @@ module Passkit
 
         def decrypt_payload
           @payload = Passkit::UrlEncrypt.decrypt(params[:payload])
-          if DateTime.parse(@payload[:valid_until]).past?
-            head :not_found
+          valid_until = begin
+            DateTime.parse(@payload[:valid_until].to_s)
+          rescue ArgumentError, TypeError
+            nil
           end
+          head(:not_found) if valid_until.nil? || valid_until.past?
         end
 
         def set_generator

@@ -56,19 +56,17 @@ class TestFullPassLifecycle < ActionDispatch::IntegrationTest
     assert_equal "", response.body
 
     # 7) Registrations index for the device → returns serials.
-    # NOTE: the controller looks up devices by `identifier` (Apple's deviceLibraryIdentifier),
-    # so the `device_id` route segment carries the identifier we registered with.
-    device_id = Passkit::Device.last.identifier
-    get device_registrations_path(device_id: device_id, pass_type_id: pass.pass_type_identifier)
+    # All registration endpoints route on `deviceLibraryIdentifier` per the
+    # Apple PassKit spec, so `device_id` is the identifier string.
+    device_identifier = Passkit::Device.last.identifier
+    get device_registrations_path(device_id: device_identifier, pass_type_id: pass.pass_type_identifier)
     assert_response :success
     json = JSON.parse(response.body)
     assert_equal [pass.serial_number], json["serialNumbers"]
 
-    # 8) Unregister.
-    # NOTE: the destroy action filters registrations by `passkit_device_id` directly
-    # using `params[:device_id]`, so this segment must carry the AR primary key.
+    # 8) Unregister with the same identifier.
     delete device_unregister_path(
-      device_id: Passkit::Device.last.id,
+      device_id: device_identifier,
       pass_type_id: pass.pass_type_identifier,
       serial_number: pass.serial_number
     ), headers: {"Authorization" => "ApplePass #{pass.authentication_token}"}
@@ -76,7 +74,7 @@ class TestFullPassLifecycle < ActionDispatch::IntegrationTest
     assert_equal 0, Passkit::Registration.count
 
     # 9) After unregister, registrations index returns 204.
-    get device_registrations_path(device_id: device_id, pass_type_id: pass.pass_type_identifier)
+    get device_registrations_path(device_id: device_identifier, pass_type_id: pass.pass_type_identifier)
     assert_response :no_content
   end
 end

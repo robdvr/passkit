@@ -120,4 +120,28 @@ class TestUrlEncrypt < Minitest::Test
       Passkit::UrlEncrypt.decrypt("DEADBEEF")
     end
   end
+
+  def test_format_is_aes_256_gcm_v2
+    assert_equal "AES-256-GCM", Passkit::UrlEncrypt::CIPHER_NAME
+    assert_equal "02", Passkit::UrlEncrypt::VERSION_BYTE
+  end
+
+  def test_decrypt_rejects_tampered_ciphertext
+    # Use a payload long enough to give us bytes to flip past version+IV+tag.
+    encrypted = Passkit::UrlEncrypt.encrypt({foo: "0123456789ABCDEFGHIJ"})
+    ciphertext_offset = Passkit::UrlEncrypt::VERSION_BYTE.length +
+      Passkit::UrlEncrypt::IV_HEX_LEN +
+      Passkit::UrlEncrypt::AUTH_TAG_HEX_LEN
+    tampered = encrypted.dup
+    tampered[ciphertext_offset] = ((tampered[ciphertext_offset] == "0") ? "1" : "0")
+    assert_raises(OpenSSL::Cipher::CipherError) { Passkit::UrlEncrypt.decrypt(tampered) }
+  end
+
+  def test_decrypt_rejects_tampered_auth_tag
+    encrypted = Passkit::UrlEncrypt.encrypt({foo: "bar"})
+    tag_offset = Passkit::UrlEncrypt::VERSION_BYTE.length + Passkit::UrlEncrypt::IV_HEX_LEN
+    tampered = encrypted.dup
+    tampered[tag_offset] = ((tampered[tag_offset] == "0") ? "1" : "0")
+    assert_raises(OpenSSL::Cipher::CipherError) { Passkit::UrlEncrypt.decrypt(tampered) }
+  end
 end

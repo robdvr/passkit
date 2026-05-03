@@ -25,12 +25,12 @@ module Passkit
 
     def self.compress_passes_files(files)
       zip_path = TMP_FOLDER.join("#{SecureRandom.uuid}.pkpasses")
-      zipped_file = File.open(zip_path, "w")
+      File.open(zip_path, "wb") {} # ensure binary mode
 
-      Zip::OutputStream.open(zipped_file.path) do |z|
+      Zip::OutputStream.open(zip_path.to_s) do |z|
         files.each do |file|
           z.put_next_entry(File.basename(file))
-          z.print File.read(file)
+          z.print File.binread(file)
         end
       end
       zip_path
@@ -116,9 +116,11 @@ module Passkit
     # rubocop:enable Metrics/AbcSize
 
     def generate_json_manifest
+      # SHA-1 is mandated by Apple's PassKit spec for manifest entries; do not
+      # change this digest without re-reading the spec.
       manifest = {}
       pass_files.each do |file|
-        manifest[file.relative_path_from(@temporary_path).to_s] = Digest::SHA1.hexdigest(File.read(file))
+        manifest[file.relative_path_from(@temporary_path).to_s] = Digest::SHA1.hexdigest(File.binread(file))
       end
 
       @manifest_url = @temporary_path.join("manifest.json")
@@ -129,27 +131,27 @@ module Passkit
     def sign_manifest
       certificate_path = Rails.root.join(ENV["PASSKIT_PRIVATE_P12_CERTIFICATE"])
       intermediate_path = Rails.root.join(ENV["PASSKIT_APPLE_INTERMEDIATE_CERTIFICATE"])
-      p12_certificate = OpenSSL::PKCS12.new(File.read(certificate_path), ENV["PASSKIT_CERTIFICATE_KEY"])
-      intermediate_certificate = OpenSSL::X509::Certificate.new(File.read(intermediate_path))
+      p12_certificate = OpenSSL::PKCS12.new(File.binread(certificate_path), ENV["PASSKIT_CERTIFICATE_KEY"])
+      intermediate_certificate = OpenSSL::X509::Certificate.new(File.binread(intermediate_path))
 
       flag = OpenSSL::PKCS7::DETACHED | OpenSSL::PKCS7::BINARY
       signed = OpenSSL::PKCS7.sign(p12_certificate.certificate,
-        p12_certificate.key, File.read(@manifest_url),
+        p12_certificate.key, File.binread(@manifest_url),
         [intermediate_certificate], flag)
 
       @signature_url = @temporary_path.join("signature")
-      File.open(@signature_url, "w") { |f| f.syswrite signed.to_der }
+      File.binwrite(@signature_url, signed.to_der)
     end
     # standard:enable Metrics/AbcSize
 
     def compress_pass_file
       zip_path = TMP_FOLDER.join("#{@pass.file_name}.pkpass")
-      zipped_file = File.open(zip_path, "w")
+      File.open(zip_path, "wb") {} # ensure binary mode
 
-      Zip::OutputStream.open(zipped_file.path) do |z|
+      Zip::OutputStream.open(zip_path.to_s) do |z|
         pass_files.each do |file|
           z.put_next_entry(file.relative_path_from(@temporary_path).to_s)
-          z.print File.read(file)
+          z.print File.binread(file)
         end
       end
       zip_path

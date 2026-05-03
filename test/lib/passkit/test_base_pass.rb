@@ -30,9 +30,9 @@ class TestBasePass < ActiveSupport::TestCase
     end
   end
 
-  def test_format_version_uses_env
+  def test_format_version_uses_env_and_coerces_to_integer
     with_env("PASSKIT_FORMAT_VERSION" => "2") do
-      assert_equal "2", Passkit::BasePass.new.format_version
+      assert_equal 2, Passkit::BasePass.new.format_version
     end
   end
 

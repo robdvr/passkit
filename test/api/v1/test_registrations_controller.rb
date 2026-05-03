@@ -177,6 +177,58 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
     assert_equal 0, Passkit::Registration.count
   end
 
+  def test_destroy_matches_by_device_library_identifier
+    # The {deviceLibraryIdentifier} URL segment is an opaque string per Apple's
+    # spec; destroy must look up Device by `identifier`, not by AR primary key.
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+    identifier = "apple-device-#{SecureRandom.hex(8)}"
+
+    post device_register_path(device_id: identifier, pass_type_id: pass.pass_type_identifier, serial_number: pass.serial_number),
+      params: {pushToken: "TOK"}.to_json,
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}",
+                "Content-Type" => "application/json"}
+    assert_response :created
+    assert_equal 1, Passkit::Registration.count
+
+    delete device_unregister_path(device_id: identifier, pass_type_id: pass.pass_type_identifier, serial_number: pass.serial_number),
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}"}
+    assert_response :ok
+    assert_equal 0, Passkit::Registration.count
+  end
+
+  def test_destroy_with_unknown_device_identifier_is_a_noop_returning_200
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+    delete device_unregister_path(device_id: "never-registered", pass_type_id: pass.pass_type_identifier, serial_number: pass.serial_number),
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}"}
+    assert_response :ok
+  end
+
+  def test_register_updates_push_token_when_device_already_exists
+    # Apple rotates push tokens; subsequent registrations must update them.
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass1 = Passkit::Pass.first
+    pass2 = Passkit::Pass.last
+    identifier = "rotating-device"
+
+    post device_register_path(device_id: identifier, pass_type_id: pass1.pass_type_identifier, serial_number: pass1.serial_number),
+      params: {pushToken: "TOKEN-A"}.to_json,
+      headers: {"Authorization" => "ApplePass #{pass1.authentication_token}",
+                "Content-Type" => "application/json"}
+    assert_response :created
+    assert_equal "TOKEN-A", Passkit::Device.find_by(identifier: identifier).push_token
+
+    post device_register_path(device_id: identifier, pass_type_id: pass2.pass_type_identifier, serial_number: pass2.serial_number),
+      params: {pushToken: "TOKEN-B"}.to_json,
+      headers: {"Authorization" => "ApplePass #{pass2.authentication_token}",
+                "Content-Type" => "application/json"}
+    assert_response :created
+    assert_equal "TOKEN-B", Passkit::Device.find_by(identifier: identifier).push_token
+    assert_equal 1, Passkit::Device.count
+  end
+
   private
 
   def register_pass(pass)

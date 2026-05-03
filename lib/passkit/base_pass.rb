@@ -5,7 +5,8 @@ module Passkit
     end
 
     def format_version
-      ENV["PASSKIT_FORMAT_VERSION"] || 1
+      # Apple's spec requires a JSON integer here. ENV strings get coerced.
+      ENV["PASSKIT_FORMAT_VERSION"]&.to_i || 1
     end
 
     def apple_team_identifier

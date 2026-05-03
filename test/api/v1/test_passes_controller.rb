@@ -58,6 +58,30 @@ class TestPassesController < ActionDispatch::IntegrationTest
     assert_response :not_found
   end
 
+  def test_create_with_nil_valid_until_returns_404
+    payload = Passkit::UrlEncrypt.encrypt(
+      valid_until: nil,
+      generator_class: nil,
+      generator_id: nil,
+      pass_class: Passkit::ExampleStoreCard.name,
+      collection_name: nil
+    )
+    get passes_api_path(payload)
+    assert_response :not_found
+  end
+
+  def test_create_with_malformed_valid_until_returns_404
+    payload = Passkit::UrlEncrypt.encrypt(
+      valid_until: "not-a-real-date",
+      generator_class: nil,
+      generator_id: nil,
+      pass_class: Passkit::ExampleStoreCard.name,
+      collection_name: nil
+    )
+    get passes_api_path(payload)
+    assert_response :not_found
+  end
+
   def test_create_with_payload_referencing_missing_generator_raises_record_not_found
     payload = Passkit::UrlEncrypt.encrypt(
       valid_until: 30.days.from_now,

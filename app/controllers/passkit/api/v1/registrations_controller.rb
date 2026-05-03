@@ -1,7 +1,6 @@
 module Passkit
   module Api
     module V1
-      # TODO: check with authentication_token
       # This Class Implements the Apple PassKit API
       # @see Apple: https://developer.apple.com/library/archive/documentation/PassKit/Reference/PassKit_WebService/WebService.html
       # @see Android: https://walletpasses.io/developer/
@@ -41,15 +40,15 @@ module Passkit
             return
           end
 
-          render json: updatable_passes(passes).to_json
+          render json: updatable_passes(passes)
         end
 
         # @return If disassociation succeeds, returns HTTP status 200.
         # @return If the request is not authorized, returns HTTP status 401.
         # @return Otherwise, returns the appropriate standard HTTP status.
         def destroy
-          registrations = @pass.registrations.where(passkit_device_id: params[:device_id])
-          registrations.delete_all
+          device = Passkit::Device.find_by(identifier: params[:device_id])
+          @pass.registrations.where(device: device).delete_all if device
           render json: {}, status: :ok
         end
 
@@ -73,7 +72,9 @@ module Passkit
         end
 
         def register_device
-          device = Passkit::Device.find_or_create_by!(identifier: params[:device_id]) { |d| d.push_token = push_token }
+          device = Passkit::Device.find_or_create_by!(identifier: params[:device_id])
+          token = push_token
+          device.update!(push_token: token) if token.present? && device.push_token != token
           @pass.registrations.create!(device: device)
         end
 
@@ -91,13 +92,6 @@ module Passkit
 
         def updatable_passes(passes)
           {lastUpdated: Time.zone.now, serialNumbers: passes.pluck(:serial_number)}
-        end
-
-        # TODO: add authentication_token
-        # The value is the word ApplePass, followed by a space
-        # The value is the word AndroidPass (instead of ApplePass), followed by a space
-        def authentication_token
-          ""
         end
 
         def push_token
