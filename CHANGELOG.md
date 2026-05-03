@@ -1,3 +1,25 @@
+## [Unreleased]
+
+### Breaking changes
+- **Rails / Ruby floor raised.** Now requires Rails ≥ 8.0 and Ruby ≥ 3.4. The dummy app and tests run against Rails 8.1.3 / Ruby 3.4.x.
+- **URL payload format changed.** `Passkit::UrlEncrypt` now uses AES-256-CBC with a per-encrypt random IV and a SHA-256 derived key, prefixed with a `01` format-version byte. Previously-issued pass URLs (in user wallets, in already-sent emails) will no longer decrypt — re-issue them after upgrading.
+- **`serial_number` collision retry loop removed.** A new migration adds a unique DB index on `passkit_passes.serial_number`; the `before_validation` callback no longer polls `Passkit::Pass.exists?`. Existing installs need to run the new migration: `rails g passkit:install` will copy it, or write your own with `add_index :passkit_passes, :serial_number, unique: true`.
+- **Asset pipeline.** Dummy app and dev deps switched from `sprockets-rails` to `propshaft` to match Rails 8 defaults. The gem itself ships no assets, so host apps keep their own pipeline choice.
+
+### Bug fixes
+- **`Passkit::Generator`** — `Dir.glob(temp.join("**"))` was shallow, silently dropping localized `.lproj` files and any other nested assets from `manifest.json` and the final `.pkpass` zip. Now uses `**/*` and skips directories. Manifest keys for nested files are the path relative to the pass root.
+- **`Passkit::Generator#generate_json_pass`** — boarding-pass `transitType` (and any other `boarding_pass` overrides) were silently dropped because `pass[:boardingPass].merge(...)` returned a new hash that was discarded. Boarding-pass extras are now properly merged.
+- **`Passkit::Generator`** — `CERTIFICATE`, `INTERMEDIATE_CERTIFICATE`, and `CERTIFICATE_PASSWORD` constants were resolved at class load, breaking `require "passkit"` in environments without the certificate env vars. Now resolved per call inside `#sign_manifest`.
+- **`Api::V1::RegistrationsController#push_token`** — replaced raw-body `JSON.parse` with `params[:pushToken]`, with a body-parse fallback that rescues `JSON::ParserError`. Empty / non-JSON bodies no longer crash the registration endpoint.
+- **`Api::V1::RegistrationsController#fetch_registered_passes`** — `passesUpdatedSince` filter no longer loads every pass into memory; uses a SQL `WHERE updated_at >= ?` filter and rescues malformed input dates.
+- **`Api::V1::LogsController#create`** — wraps `params[:logs]` in `Array(...)` so a missing/empty body is a no-op 200 instead of a 500.
+- **`Dashboard::PreviewsController#show`** — unknown `class_name` returns 404 instead of crashing on `nil.call`.
+
+### New
+- Test suite expanded from 8 to 207 tests (500 assertions). Coverage: 92% line, 97% branch.
+- `test/support/cert_helper.rb` generates ephemeral throwaway p12 + intermediate certs at suite start so `Passkit::Generator#sign_manifest` is exercised under test.
+- GitHub Actions CI workflow (`test`, `lint`).
+
 ## [0.7.0]
 - [#25](https://github.com/coorasse/passkit/pull/25): Change the label default color to black.
 

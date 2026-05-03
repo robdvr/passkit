@@ -10,6 +10,7 @@ class CreatePasskitTables < ActiveRecord::Migration[<%= ActiveRecord::Migration.
       t.integer :version
       t.timestamps null: false
       t.index [:generator_type, :generator_id], name: 'index_passkit_passes_on_generator'
+      t.index :serial_number, unique: true
     end
 
     create_table :passkit_devices do |t|

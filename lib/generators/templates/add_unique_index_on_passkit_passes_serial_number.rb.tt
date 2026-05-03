@@ -1,0 +1,5 @@
+class AddUniqueIndexOnPasskitPassesSerialNumber < ActiveRecord::Migration[<%= ActiveRecord::Migration.current_version %>]
+  def change
+    add_index :passkit_passes, :serial_number, unique: true
+  end
+end

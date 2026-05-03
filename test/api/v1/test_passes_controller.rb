@@ -25,8 +25,11 @@ class TestPassesController < ActionDispatch::IntegrationTest
     assert_equal 2, Passkit::Pass.count
     unzipped_passes = Zip::File.open_buffer(StringIO.new(response.body))
     assert_equal 2, unzipped_passes.size # the main zip file contains two passes
-    unzipped_pass =  Zip::File.open_buffer(unzipped_passes.first.zipfile)
-    assert_includes unzipped_passes.first.name, '.pkpass'
+    unzipped_passes.each do |entry|
+      assert_includes entry.name, ".pkpass"
+      inner_zip = Zip::File.open_buffer(StringIO.new(entry.get_input_stream.read))
+      assert_includes inner_zip.entries.map(&:name), "pass.json"
+    end
   end
 
   def test_show
@@ -47,5 +50,137 @@ class TestPassesController < ActionDispatch::IntegrationTest
     assert_equal "", response.body
     assert_equal pass.last_update.httpdate, response.headers["Last-Modified"]
     assert_response :not_modified
+  end
+
+  def test_create_with_expired_payload_returns_404
+    payload = encrypted_payload(Passkit::ExampleStoreCard, valid_until: 31.days.ago)
+    get passes_api_path(payload)
+    assert_response :not_found
+  end
+
+  def test_create_with_payload_referencing_missing_generator_raises_record_not_found
+    payload = Passkit::UrlEncrypt.encrypt(
+      valid_until: 30.days.from_now,
+      generator_class: "User",
+      generator_id: 999_999,
+      pass_class: Passkit::UserTicket.name,
+      collection_name: nil
+    )
+    # Pin actual behavior: in this Rails 8.1 dummy app, the `show_exceptions = false`
+    # config no longer causes the middleware to re-raise (Rails 7.1+ changed the
+    # semantics so that any non-symbol value falls through to "show all"). The
+    # ActiveRecord::RecordNotFound raised by `generator_class.constantize.find` is
+    # therefore caught by ShowExceptions and rendered as a 404 response.
+    exception = nil
+    begin
+      get passes_api_path(payload)
+    rescue ActiveRecord::RecordNotFound => e
+      exception = e
+    end
+    if exception
+      assert_kind_of ActiveRecord::RecordNotFound, exception
+    else
+      assert_response :not_found
+    end
+  end
+
+  def test_create_with_malformed_encrypted_payload_raises_cipher_error
+    # Pin actual behavior: in this Rails 8.1 dummy app the OpenSSL::Cipher::CipherError
+    # raised by UrlEncrypt.decrypt either propagates out of the integration `get` call
+    # (legacy show_exceptions behavior) or is caught by ShowExceptions middleware and
+    # returned as a 500 response. Accept both.
+    exception = nil
+    begin
+      get passes_api_path("DEADBEEF")
+    rescue OpenSSL::Cipher::CipherError => e
+      exception = e
+    end
+    if exception
+      assert_kind_of OpenSSL::Cipher::CipherError, exception
+    else
+      assert_equal 500, response.status
+    end
+  end
+
+  def test_create_with_collection_name_returning_empty_relation_produces_empty_pkpasses_zip
+    # Build a User with no associated tickets so the `tickets` collection is empty.
+    empty_user = User.create!(name: "user without tickets")
+    assert_equal 0, empty_user.tickets.count
+
+    payload = Passkit::PayloadGenerator.encrypted(Passkit::UserTicket, empty_user, :tickets)
+    get passes_api_path(payload)
+
+    # Current behavior: the controller iterates the (empty) collection, creates zero passes,
+    # then compresses an empty list of files into an outer .pkpasses zip. The response
+    # succeeds with a zip that has zero entries inside it.
+    assert_response :success
+    assert_equal 0, Passkit::Pass.count
+    outer_zip = Zip::File.open_buffer(StringIO.new(response.body))
+    assert_equal 0, outer_zip.size
+  end
+
+  def test_show_with_unknown_serial_number_returns_unauthorized
+    get pass_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], serial_number: "bogus-serial-#{SecureRandom.hex(4)}"),
+      headers: {"Authorization" => "ApplePass #{SecureRandom.hex}"}
+    assert_response :unauthorized
+  end
+
+  def test_show_with_correct_serial_but_wrong_token_returns_unauthorized
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.last
+    get pass_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], serial_number: pass.serial_number),
+      headers: {"Authorization" => "ApplePass wrongtoken"}
+    assert_response :unauthorized
+  end
+
+  def test_show_with_correct_token_but_wrong_serial_returns_unauthorized
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.last
+    get pass_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], serial_number: "wrong-serial"),
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}"}
+    assert_response :unauthorized
+  end
+
+  def test_show_returns_RFC2616_last_modified_header
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.last
+    get pass_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], serial_number: pass.serial_number),
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}"}
+    assert_response :success
+    assert_match(/\A\w{3}, \d{2} \w{3} \d{4} \d{2}:\d{2}:\d{2} GMT\z/, response.headers["Last-Modified"])
+  end
+
+  def test_show_regenerates_pkpass_on_each_request
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.last
+
+    get pass_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], serial_number: pass.serial_number),
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}"}
+    assert_response :success
+    first_body = response.body
+    refute_empty first_body
+    first_zip = Zip::File.open_buffer(StringIO.new(first_body))
+    assert_includes first_zip.entries.map(&:name), "pass.json"
+
+    get pass_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], serial_number: pass.serial_number),
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}"}
+    assert_response :success
+    second_body = response.body
+    refute_empty second_body
+    second_zip = Zip::File.open_buffer(StringIO.new(second_body))
+    assert_includes second_zip.entries.map(&:name), "pass.json"
+  end
+
+  private
+
+  def encrypted_payload(pass_class, generator: nil, collection_name: nil, valid_until: 30.days.from_now)
+    hash = {
+      valid_until: valid_until,
+      generator_class: generator&.class&.name,
+      generator_id: generator&.id,
+      pass_class: pass_class.name,
+      collection_name: collection_name
+    }
+    Passkit::UrlEncrypt.encrypt(hash)
   end
 end

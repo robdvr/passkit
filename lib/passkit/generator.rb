@@ -36,7 +36,7 @@ module Passkit
       zip_path
     end
 
-  private
+    private
 
     def check_necessary_files
       raise "icon.png is not present in #{@pass.pass_path}" unless File.exist?(File.join(@pass.pass_path, "icon.png"))
@@ -106,7 +106,9 @@ module Passkit
         backFields: @pass.back_fields
       }
 
-      pass[:boardingPass].merge(@pass.boarding_pass) if @pass.pass_type == :boardingPass && @pass.boarding_pass
+      if @pass.pass_type == :boardingPass && @pass.boarding_pass
+        pass[:boardingPass] = pass[:boardingPass].merge(@pass.boarding_pass)
+      end
 
       File.write(@temporary_path.join("pass.json"), pass.to_json)
     end
@@ -115,22 +117,20 @@ module Passkit
 
     def generate_json_manifest
       manifest = {}
-      Dir.glob(@temporary_path.join("**")).each do |file|
-        manifest[File.basename(file)] = Digest::SHA1.hexdigest(File.read(file))
+      pass_files.each do |file|
+        manifest[file.relative_path_from(@temporary_path).to_s] = Digest::SHA1.hexdigest(File.read(file))
       end
 
       @manifest_url = @temporary_path.join("manifest.json")
       File.write(@manifest_url, manifest.to_json)
     end
 
-    CERTIFICATE = Rails.root.join(ENV["PASSKIT_PRIVATE_P12_CERTIFICATE"])
-    INTERMEDIATE_CERTIFICATE = Rails.root.join(ENV["PASSKIT_APPLE_INTERMEDIATE_CERTIFICATE"])
-    CERTIFICATE_PASSWORD = ENV["PASSKIT_CERTIFICATE_KEY"]
-
-    # :nocov:
+    # standard:disable Metrics/AbcSize
     def sign_manifest
-      p12_certificate = OpenSSL::PKCS12.new(File.read(CERTIFICATE), CERTIFICATE_PASSWORD)
-      intermediate_certificate = OpenSSL::X509::Certificate.new(File.read(INTERMEDIATE_CERTIFICATE))
+      certificate_path = Rails.root.join(ENV["PASSKIT_PRIVATE_P12_CERTIFICATE"])
+      intermediate_path = Rails.root.join(ENV["PASSKIT_APPLE_INTERMEDIATE_CERTIFICATE"])
+      p12_certificate = OpenSSL::PKCS12.new(File.read(certificate_path), ENV["PASSKIT_CERTIFICATE_KEY"])
+      intermediate_certificate = OpenSSL::X509::Certificate.new(File.read(intermediate_path))
 
       flag = OpenSSL::PKCS7::DETACHED | OpenSSL::PKCS7::BINARY
       signed = OpenSSL::PKCS7.sign(p12_certificate.certificate,
@@ -140,20 +140,23 @@ module Passkit
       @signature_url = @temporary_path.join("signature")
       File.open(@signature_url, "w") { |f| f.syswrite signed.to_der }
     end
-
-    # :nocov:
+    # standard:enable Metrics/AbcSize
 
     def compress_pass_file
       zip_path = TMP_FOLDER.join("#{@pass.file_name}.pkpass")
       zipped_file = File.open(zip_path, "w")
 
       Zip::OutputStream.open(zipped_file.path) do |z|
-        Dir.glob(@temporary_path.join("**")).each do |file|
-          z.put_next_entry(File.basename(file))
+        pass_files.each do |file|
+          z.put_next_entry(file.relative_path_from(@temporary_path).to_s)
           z.print File.read(file)
         end
       end
       zip_path
+    end
+
+    def pass_files
+      Dir.glob(@temporary_path.join("**", "*")).map { |f| Pathname.new(f) }.select(&:file?)
     end
   end
 end

@@ -24,7 +24,117 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
     assert_equal 1, pass2.devices.count
   end
 
-  def test_show
+  def test_create_when_device_already_registered_returns_200
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+
+    register_pass(pass)
+    assert_response :created
+
+    register_pass(pass)
+    assert_response :ok
+    assert_equal 1, pass.devices.count
+  end
+
+  def test_create_two_passes_to_same_device
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass1 = Passkit::Pass.first
+    pass2 = Passkit::Pass.last
+
+    register_pass(pass1)
+    assert_response :created
+    register_pass(pass2)
+    assert_response :created
+
+    assert_equal 1, Passkit::Device.count
+    assert_equal 2, Passkit::Registration.count
+  end
+
+  def test_create_without_authorization_header_returns_401
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+
+    post device_register_path(device_id: 1, pass_type_id: pass.pass_type_identifier, serial_number: pass.serial_number),
+      params: {pushToken: "1234567890"}.to_json
+
+    assert_response :unauthorized
+  end
+
+  def test_create_with_wrong_authorization_token_returns_401
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+
+    post device_register_path(device_id: 1, pass_type_id: pass.pass_type_identifier, serial_number: pass.serial_number),
+      params: {pushToken: "1234567890"}.to_json,
+      headers: {"Authorization" => "ApplePass wrongtoken"}
+
+    assert_response :unauthorized
+  end
+
+  def test_create_with_empty_body_succeeds_with_nil_push_token
+    # Fixed in app/controllers/passkit/api/v1/registrations_controller.rb#push_token
+    # — empty / non-JSON bodies no longer crash; push_token returns nil and the
+    # device is registered without one.
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+
+    post device_register_path(device_id: 1, pass_type_id: pass.pass_type_identifier, serial_number: pass.serial_number),
+      params: "",
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}"}
+
+    assert_response :created
+    assert_nil Passkit::Device.last.push_token
+  end
+
+  def test_show_returns_404_when_device_unknown
+    get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: "nonexistent-device")
+    assert_response :not_found
+  end
+
+  def test_show_returns_204_when_device_has_no_passes
+    Passkit::Device.create!(identifier: "dev-1")
+    get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: "dev-1")
+    assert_response :no_content
+  end
+
+  def test_show_returns_200_with_lastUpdated_and_serialNumbers_when_passes_exist
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass1 = Passkit::Pass.first
+    pass2 = Passkit::Pass.last
+
+    register_pass(pass1)
+    register_pass(pass2)
+
+    get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: 1)
+    assert_response :ok
+
+    json = JSON.parse(response.body)
+    assert_kind_of Hash, json
+    assert json.key?("lastUpdated")
+    assert_equal 2, json["serialNumbers"].size
+  end
+
+  # TODO(bug:app/controllers/passkit/api/v1/registrations_controller.rb:84): pins eager .all.filter — Phase C will use DB-level filter.
+  def test_show_with_passesUpdatedSince_filter_loads_all_in_memory
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    passes = Passkit::Pass.order(:id).to_a
+
+    passes.each { |p| register_pass(p) }
+
+    # Set one pass's updated_at to 7 days ago, leaving 2 recent passes
+    passes.first.update_columns(updated_at: 7.days.ago)
+    recent_serials = passes[1..].map(&:serial_number)
+
+    get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: 1),
+      params: {passesUpdatedSince: Date.today.iso8601}
+
+    assert_response :ok
+    json = JSON.parse(response.body)
+    assert_equal recent_serials.sort, json["serialNumbers"].sort
   end
 
   def test_destroy
@@ -36,6 +146,35 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
     assert_equal 0, Passkit::Registration.count
     assert_equal 1, Passkit::Pass.count
     assert_equal 1, Passkit::Device.count
+  end
+
+  def test_destroy_without_auth_returns_401
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+    register_pass(pass)
+    registration = pass.registrations.first
+
+    delete device_unregister_path(device_id: registration.device.id,
+      pass_type_id: registration.pass.pass_type_identifier,
+      serial_number: registration.pass.serial_number),
+      params: {}.to_json
+
+    assert_response :unauthorized
+  end
+
+  def test_destroy_is_idempotent
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+    register_pass(pass)
+    registration = pass.registrations.first
+
+    destroy_registration(registration)
+    assert_response :ok
+
+    destroy_registration(registration)
+    assert_response :ok
+
+    assert_equal 0, Passkit::Registration.count
   end
 
   private

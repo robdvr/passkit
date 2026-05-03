@@ -79,12 +79,14 @@ module Passkit
 
         def fetch_registered_passes
           passes = @device.passes
+          return passes unless params[:passesUpdatedSince]&.present?
 
-          if params[:passesUpdatedSince]&.present?
-            passes.all.filter { |a| a.last_update >= Date.parse(params[:passesUpdatedSince]) }
-          else
-            passes
+          since = begin
+            Date.parse(params[:passesUpdatedSince])
+          rescue ArgumentError, TypeError
+            return passes
           end
+          passes.where("passkit_passes.updated_at >= ?", since)
         end
 
         def updatable_passes(passes)
@@ -99,11 +101,17 @@ module Passkit
         end
 
         def push_token
-          return unless request&.body
+          # Apple posts {"pushToken": "..."} as JSON; Rails parses application/json
+          # bodies into params automatically. Fall back to raw-body parse for
+          # callers that POST without the proper Content-Type.
+          return params[:pushToken] if params.key?(:pushToken)
 
-          request.body.rewind
-          json_body = JSON.parse(request.body.read)
-          json_body["pushToken"]
+          raw = request.raw_post
+          return nil if raw.blank?
+
+          JSON.parse(raw)["pushToken"]
+        rescue JSON::ParserError
+          nil
         end
       end
     end

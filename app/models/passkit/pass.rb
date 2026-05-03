@@ -47,10 +47,7 @@ module Passkit
 
     before_validation on: :create do
       self.authentication_token ||= SecureRandom.hex
-      loop do
-        self.serial_number = SecureRandom.uuid
-        break unless self.class.exists?(serial_number: serial_number)
-      end
+      self.serial_number ||= SecureRandom.uuid
     end
 
     def instance
