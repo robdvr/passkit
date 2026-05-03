@@ -108,22 +108,24 @@ class TestPassesController < ActionDispatch::IntegrationTest
     end
   end
 
-  def test_create_with_malformed_encrypted_payload_raises_cipher_error
-    # Pin actual behavior: in this Rails 8.1 dummy app the OpenSSL::Cipher::CipherError
-    # raised by UrlEncrypt.decrypt either propagates out of the integration `get` call
-    # (legacy show_exceptions behavior) or is caught by ShowExceptions middleware and
-    # returned as a 500 response. Accept both.
-    exception = nil
-    begin
-      get passes_api_path("DEADBEEF")
-    rescue OpenSSL::Cipher::CipherError => e
-      exception = e
-    end
-    if exception
-      assert_kind_of OpenSSL::Cipher::CipherError, exception
-    else
-      assert_equal 500, response.status
-    end
+  def test_create_with_malformed_encrypted_payload_returns_404
+    # `decrypt_payload` rescues OpenSSL::Cipher::CipherError so tampered or
+    # malformed URLs cannot be probed for crypto errors via the response.
+    get passes_api_path("DEADBEEF")
+    assert_response :not_found
+  end
+
+  def test_create_with_tampered_ciphertext_returns_404
+    payload = encrypted_payload(Passkit::ExampleStoreCard)
+    tampered = payload.dup
+    # Flip a byte in the ciphertext portion (past version+IV+tag).
+    offset = Passkit::UrlEncrypt::VERSION_BYTE.length +
+      Passkit::UrlEncrypt::IV_HEX_LEN +
+      Passkit::UrlEncrypt::AUTH_TAG_HEX_LEN
+    tampered[offset] = ((tampered[offset] == "0") ? "1" : "0")
+
+    get passes_api_path(tampered)
+    assert_response :not_found
   end
 
   def test_create_with_collection_name_returning_empty_relation_produces_empty_pkpasses_zip
@@ -172,6 +174,56 @@ class TestPassesController < ActionDispatch::IntegrationTest
       headers: {"Authorization" => "ApplePass #{pass.authentication_token}"}
     assert_response :success
     assert_match(/\A\w{3}, \d{2} \w{3} \d{4} \d{2}:\d{2}:\d{2} GMT\z/, response.headers["Last-Modified"])
+  end
+
+  def test_show_with_malformed_if_modified_since_treats_as_not_present
+    # A garbage If-Modified-Since header must not 500 the show action.
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.last
+    get pass_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], serial_number: pass.serial_number),
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}",
+                "If-Modified-Since" => "not-a-real-date"}
+    assert_response :success
+  end
+
+  def test_create_rejects_pass_class_outside_allowlist_when_set
+    Passkit.configuration.pass_classes = ["Passkit::OnlyThisOne"]
+    payload = encrypted_payload(Passkit::ExampleStoreCard)
+    get passes_api_path(payload)
+    assert_response :not_found
+  ensure
+    Passkit.configuration.pass_classes = []
+  end
+
+  def test_create_accepts_pass_class_in_allowlist
+    Passkit.configuration.pass_classes = ["Passkit::ExampleStoreCard"]
+    payload = encrypted_payload(Passkit::ExampleStoreCard)
+    get passes_api_path(payload)
+    assert_response :success
+  ensure
+    Passkit.configuration.pass_classes = []
+  end
+
+  def test_create_rejects_generator_class_outside_allowlist_when_set
+    Passkit.configuration.pass_generators = ["AdminUser"]
+    payload = Passkit::PayloadGenerator.encrypted(Passkit::UserStoreCard, User.find(1))
+    get passes_api_path(payload)
+    assert_response :not_found
+  ensure
+    Passkit.configuration.pass_generators = []
+  end
+
+  def test_create_with_unknown_collection_name_returns_404
+    user = User.find(1)
+    payload = Passkit::UrlEncrypt.encrypt(
+      valid_until: 30.days.from_now,
+      generator_class: "User",
+      generator_id: user.id,
+      pass_class: Passkit::UserTicket.name,
+      collection_name: "send_email_to_attacker"
+    )
+    get passes_api_path(payload)
+    assert_response :not_found
   end
 
   def test_show_regenerates_pkpass_on_each_request

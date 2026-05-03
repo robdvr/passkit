@@ -8,7 +8,10 @@ module Passkit
           set_generator
 
           if @generator && @payload[:collection_name].present?
-            files = @generator.public_send(@payload[:collection_name]).collect do |collection_item|
+            collection_name = validated_collection_name(@generator, @payload[:collection_name])
+            return head(:not_found) unless collection_name
+
+            files = @generator.public_send(collection_name).collect do |collection_item|
               Passkit::Factory.create_pass(@payload[:pass_class], collection_item)
             end
             file = Passkit::Generator.compress_passes_files(files)
@@ -38,8 +41,8 @@ module Passkit
           pass_output_path = Passkit::Generator.new(pass).generate_and_sign
 
           response.headers["last-modified"] = pass.last_update.httpdate
-          if request.headers["If-Modified-Since"].nil? ||
-              (pass.last_update.to_i > Time.zone.parse(request.headers["If-Modified-Since"]).to_i)
+          modified_since = parse_time(request.headers["If-Modified-Since"])
+          if modified_since.nil? || pass.last_update.to_i > modified_since.to_i
             send_file(pass_output_path, type: "application/vnd.apple.pkpass", disposition: "attachment")
           else
             head :not_modified
@@ -48,14 +51,18 @@ module Passkit
 
         private
 
+        # Decrypt the URL payload, validate its shape, and check expiry.
+        # Tampered, malformed, or expired payloads all 404 (not 500) so the
+        # endpoint cannot be probed for crypto errors.
         def decrypt_payload
           @payload = Passkit::UrlEncrypt.decrypt(params[:payload])
-          valid_until = begin
-            DateTime.parse(@payload[:valid_until].to_s)
-          rescue ArgumentError, TypeError
-            nil
-          end
+          return head(:not_found) unless allowed_pass_class?(@payload[:pass_class])
+          return head(:not_found) unless allowed_generator_class?(@payload[:generator_class])
+
+          valid_until = parse_time(@payload[:valid_until])
           head(:not_found) if valid_until.nil? || valid_until.past?
+        rescue OpenSSL::Cipher::CipherError, JSON::ParserError
+          head :not_found
         end
 
         def set_generator
@@ -65,6 +72,43 @@ module Passkit
 
           generator_class = @payload[:generator_class].constantize
           @generator = generator_class.find(@payload[:generator_id])
+        end
+
+        # Parses both ISO 8601 (encrypted payload's valid_until) and RFC 2616
+        # HTTP-date (If-Modified-Since header) into Time.zone instances. Returns
+        # nil for nil / blank / unparseable input.
+        def parse_time(value)
+          return nil if value.nil? || value.to_s.empty?
+          Time.zone.parse(value.to_s)
+        rescue ArgumentError, TypeError
+          nil
+        end
+
+        # Optional defense-in-depth: when the host app configures
+        # `Passkit.configuration.pass_classes`, the payload's pass_class must
+        # appear in that list before constantize is called. Empty config means
+        # "no allowlist", preserving backward compatibility.
+        def allowed_pass_class?(name)
+          allowlist = Array(Passkit.configuration&.pass_classes).map(&:to_s)
+          return true if allowlist.empty?
+          allowlist.include?(name.to_s)
+        end
+
+        def allowed_generator_class?(name)
+          return true if name.nil?
+          allowlist = Array(Passkit.configuration&.pass_generators).map(&:to_s)
+          return true if allowlist.empty?
+          allowlist.include?(name.to_s)
+        end
+
+        # `collection_name` becomes a `public_send` argument; restrict it to
+        # AR association names declared on the generator class so it can never
+        # be coerced into calling `destroy`, `delete_all`, etc.
+        def validated_collection_name(generator, name)
+          symbol = name.to_sym
+          return symbol if generator.class.respond_to?(:reflect_on_association) &&
+            generator.class.reflect_on_association(symbol)
+          nil
         end
       end
     end

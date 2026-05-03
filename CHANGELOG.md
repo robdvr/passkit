@@ -12,6 +12,13 @@
 - **`Passkit::Generator`** — `CERTIFICATE`, `INTERMEDIATE_CERTIFICATE`, and `CERTIFICATE_PASSWORD` constants were resolved at class load, breaking `require "passkit"` in environments without the certificate env vars. Now resolved per call inside `#sign_manifest`.
 - **`Passkit::Generator`** — `File.read` and `File.open(path, "w")` could mangle binary assets (PNG icons, signatures, zip contents) on non-Linux platforms. Now uses `File.binread` / `File.binwrite` / `"wb"` consistently.
 - **`Api::V1::PassesController#decrypt_payload`** — wraps `DateTime.parse(@payload[:valid_until])` in a rescue. A nil or malformed `valid_until` now returns 404 instead of 500.
+- **`Api::V1::PassesController#decrypt_payload`** — rescues `OpenSSL::Cipher::CipherError` and `JSON::ParserError` from `UrlEncrypt.decrypt` so tampered or malformed URLs return 404 instead of leaking a 500 stacktrace that confirms a crypto error.
+- **`Api::V1::PassesController#show`** — rescues `Time.zone.parse` for malformed `If-Modified-Since` headers; treats them as not-present (response is the regenerated `.pkpass`) instead of 500.
+- **`Api::V1::PassesController#create`** — `collection_name` from the payload is validated against `generator.class.reflect_on_association(name)` before calling `public_send`. Unknown methods return 404 — closes a defense-in-depth gap if the encryption key is ever leaked.
+
+### New configuration
+- `Passkit.configuration.pass_classes` — optional allowlist of pass class names (strings or constants). Empty default = no allowlist enforcement (backward compatible). When populated, payloads referencing other classes 404 before `constantize`.
+- `Passkit.configuration.pass_generators` — same idea for `generator_class` (the polymorphic AR model that owns the pass).
 - **`Api::V1::RegistrationsController#destroy`** — was matching by `passkit_device_id` (DB integer FK) when Apple sends `deviceLibraryIdentifier` (an opaque string). Real Apple Wallet unregistrations were silently no-ops. Now looks up `Device` by `identifier` to match the rest of the controller.
 - **`Api::V1::RegistrationsController#register_device`** — `find_or_create_by!` block only ran on create, so push-token rotation by Apple was silently dropped on subsequent registrations. Now updates `push_token` post-create when it differs.
 - **`Api::V1::RegistrationsController#push_token`** — replaced raw-body `JSON.parse` with `params[:pushToken]`, with a body-parse fallback that rescues `JSON::ParserError`. Empty / non-JSON bodies no longer crash the registration endpoint.
