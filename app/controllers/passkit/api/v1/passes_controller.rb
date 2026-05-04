@@ -78,7 +78,7 @@ module Passkit
 
           generator_class = @payload[:generator_class].constantize
           @generator = generator_class.find_by(id: @payload[:generator_id])
-          head(:not_found) if @generator.nil?
+          return head(:not_found) if @generator.nil? # standard:disable Style/RedundantReturn
         end
 
         # Parses both ISO 8601 (encrypted payload's valid_until) and RFC 2616
