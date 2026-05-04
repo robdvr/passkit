@@ -5,7 +5,8 @@ module Passkit
     end
 
     def format_version
-      ENV["PASSKIT_FORMAT_VERSION"] || 1
+      # Apple's spec requires a JSON integer here. ENV strings get coerced.
+      ENV["PASSKIT_FORMAT_VERSION"]&.to_i || 1
     end
 
     def apple_team_identifier
@@ -185,10 +186,10 @@ module Passkit
 
     # QRCode by default
     def barcode
-      { messageEncoding: "iso-8859-1",
-        format: "PKBarcodeFormatQR",
-        message: "https://github.com/coorasse/passkit",
-        altText: "https://github.com/coorasse/passkit" }
+      {messageEncoding: "iso-8859-1",
+       format: "PKBarcodeFormatQR",
+       message: "https://github.com/coorasse/passkit",
+       altText: "https://github.com/coorasse/passkit"}
     end
 
     # Barcode example
@@ -227,7 +228,126 @@ module Passkit
       false
     end
 
-  private
+    # iOS 18+ enhanced (poster-style) event ticket layout opt-in.
+    # Returns an array of style scheme strings, e.g. `["posterEventTicket"]`.
+    # When set, iOS 18+ Wallet renders the poster layout and ignores most of
+    # the legacy header/primary/secondary field arrays. iOS ≤17 ignores this
+    # key and renders the classic layout — keep field arrays populated for
+    # backwards compatibility.
+    #
+    # NOTE: poster-style images (background / artwork / event logo) and the
+    # canonical filenames are not pinned in Apple's public docs. The gem's
+    # Generator copies every file in `pass_path` recursively, so supply
+    # whichever filenames your target iOS version expects.
+    # @see https://developer.apple.com/documentation/walletpasses/pass
+    def preferred_style_schemes
+      nil
+    end
+
+    # iOS 18+ additional info row(s) shown in the pass detail view.
+    # Returns an array of PassFieldContent hashes (same shape as
+    # `header_fields` etc.: `{key:, label:, value:, ...}`).
+    def additional_info_fields
+      []
+    end
+
+    # iOS 18+ branded text shown next to the event logo on the poster face.
+    def event_logo_text
+      nil
+    end
+
+    # iOS 18+ array of relevance windows (replaces singular `relevant_date`).
+    # Each entry is `{startDate: ISO8601, endDate: ISO8601}`. Apple caps each
+    # window at 24h. Both keys may be set; iOS 18+ prefers `relevant_dates`.
+    def relevant_dates
+      []
+    end
+
+    # iOS 18+ opt-in to automatic foreground/label color extraction from the
+    # background image. Boolean (or nil to omit).
+    def use_automatic_colors
+      nil
+    end
+
+    # iOS 18+ footer background color (rgb(...) string).
+    def footer_background_color
+      nil
+    end
+
+    # iOS 18+ secondary list of App Store identifiers for related apps.
+    def auxiliary_store_identifiers
+      []
+    end
+
+    # Venue utility URL fields (iOS 18+). Each returns a string URL or nil.
+    # Apple surfaces these as tappable rows in the enhanced ticket detail view.
+    def bag_policy_url
+      nil
+    end
+
+    def parking_information_url
+      nil
+    end
+
+    def merchandise_url
+      nil
+    end
+
+    def order_food_url
+      nil
+    end
+
+    def transit_information_url
+      nil
+    end
+
+    def directions_information_url
+      nil
+    end
+
+    def transfer_url
+      nil
+    end
+
+    def add_on_url
+      nil
+    end
+
+    def accessibility_url
+      nil
+    end
+
+    def purchase_parking_url
+      nil
+    end
+
+    def sell_url
+      nil
+    end
+
+    def contact_venue_email
+      nil
+    end
+
+    def contact_venue_phone_number
+      nil
+    end
+
+    def contact_venue_website
+      nil
+    end
+
+    # Localized strings for `<lang>.lproj/pass.strings` files.
+    # Returns a hash keyed by locale (string or symbol), e.g.
+    #   { en: { "EVENT" => "Event", "DOORS" => "Doors" },
+    #     es: { "EVENT" => "Evento", "DOORS" => "Puertas" } }
+    # Field `value`s referencing these keys (e.g. `value: "EVENT"`) are
+    # substituted by Wallet at render time per the device language.
+    def localized_strings
+      {}
+    end
+
+    private
 
     def folder_name
       self.class.name.demodulize.underscore

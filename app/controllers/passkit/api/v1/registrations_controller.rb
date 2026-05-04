@@ -1,10 +1,8 @@
 module Passkit
   module Api
     module V1
-      # TODO: check with authentication_token
       # This Class Implements the Apple PassKit API
       # @see Apple: https://developer.apple.com/library/archive/documentation/PassKit/Reference/PassKit_WebService/WebService.html
-      # @see Android: https://walletpasses.io/developer/
       class RegistrationsController < ActionController::API
         before_action :load_pass, only: %i[create destroy]
         before_action :load_device, only: %i[show]
@@ -41,15 +39,15 @@ module Passkit
             return
           end
 
-          render json: updatable_passes(passes).to_json
+          render json: updatable_passes(passes)
         end
 
         # @return If disassociation succeeds, returns HTTP status 200.
         # @return If the request is not authorized, returns HTTP status 401.
         # @return Otherwise, returns the appropriate standard HTTP status.
         def destroy
-          registrations = @pass.registrations.where(passkit_device_id: params[:device_id])
-          registrations.delete_all
+          device = Passkit::Device.find_by(identifier: params[:device_id])
+          @pass.registrations.where(device: device).delete_all if device
           render json: {}, status: :ok
         end
 
@@ -73,37 +71,47 @@ module Passkit
         end
 
         def register_device
-          device = Passkit::Device.find_or_create_by!(identifier: params[:device_id]) { |d| d.push_token = push_token }
+          device = Passkit::Device.find_or_create_by!(identifier: params[:device_id])
+          token = push_token
+          device.update!(push_token: token) if token.present? && device.push_token != token
           @pass.registrations.create!(device: device)
         end
 
         def fetch_registered_passes
           passes = @device.passes
+          return passes unless params[:passesUpdatedSince]&.present?
 
-          if params[:passesUpdatedSince]&.present?
-            passes.all.filter { |a| a.last_update >= Date.parse(params[:passesUpdatedSince]) }
-          else
-            passes
+          # `Time.zone.parse` preserves H:M:S; the previous `Date.parse` rounded
+          # to midnight, expanding the update window by up to 24h and surfacing
+          # passes Apple should not have re-fetched.
+          since = begin
+            Time.zone.parse(params[:passesUpdatedSince])
+          rescue ArgumentError, TypeError
+            return passes
           end
+          return passes if since.nil?
+
+          passes.where("passkit_passes.updated_at >= ?", since)
         end
 
         def updatable_passes(passes)
-          {lastUpdated: Time.zone.now, serialNumbers: passes.pluck(:serial_number)}
-        end
-
-        # TODO: add authentication_token
-        # The value is the word ApplePass, followed by a space
-        # The value is the word AndroidPass (instead of ApplePass), followed by a space
-        def authentication_token
-          ""
+          # Round-trip back through `Time.zone.parse` next call requires an
+          # ISO 8601 string, not a Time instance.
+          {lastUpdated: Time.zone.now.iso8601, serialNumbers: passes.pluck(:serial_number)}
         end
 
         def push_token
-          return unless request&.body
+          # Apple posts {"pushToken": "..."} as JSON; Rails parses application/json
+          # bodies into params automatically. Fall back to raw-body parse for
+          # callers that POST without the proper Content-Type.
+          return params[:pushToken] if params.key?(:pushToken)
 
-          request.body.rewind
-          json_body = JSON.parse(request.body.read)
-          json_body["pushToken"]
+          raw = request.raw_post
+          return nil if raw.blank?
+
+          JSON.parse(raw)["pushToken"]
+        rescue JSON::ParserError
+          nil
         end
       end
     end

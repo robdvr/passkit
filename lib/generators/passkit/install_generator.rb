@@ -21,6 +21,13 @@ module Passkit
         migration_template "create_passkit_tables.rb", "db/migrate/create_passkit_tables.rb"
         copy_file "passkit.rb", "config/initializers/passkit.rb"
       end
+
+      # Existing installs upgrading from < 1.0 need the unique index on
+      # passkit_passes.serial_number. Copy the template manually:
+      #   bundle exec rails generate migration AddUniqueIndexOnPasskitPassesSerialNumber
+      # then paste:
+      #   add_index :passkit_passes, :serial_number, unique: true
+      # See lib/generators/templates/add_unique_index_on_passkit_passes_serial_number.rb.tt
     end
   end
 end

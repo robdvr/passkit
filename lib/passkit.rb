@@ -11,6 +11,8 @@ loader.setup
 module Passkit
   class Error < StandardError; end
 
+  class ValidationError < Error; end
+
   class << self
     attr_accessor :configuration
   end
@@ -27,7 +29,10 @@ module Passkit
       :private_p12_certificate,
       :apple_intermediate_certificate,
       :apple_team_identifier,
-      :pass_type_identifier
+      :pass_type_identifier,
+      :pass_classes,
+      :pass_generators,
+      :validate_pass_json
 
     DEFAULT_AUTHENTICATION = proc do
       authenticate_or_request_with_http_basic("Passkit Dashboard. Login required") do |username, password|
@@ -41,6 +46,16 @@ module Passkit
 
     def initialize
       @available_passes = {"Passkit::ExampleStoreCard" => -> {}}
+      # Optional defense-in-depth allowlists. Strings or constants are both
+      # accepted; matched against payload values via to_s. Empty array (default)
+      # means "no allowlist enforcement" — see passes_controller for behavior.
+      @pass_classes = []
+      @pass_generators = []
+      # When true (default), Passkit::Validator runs against the generated
+      # pass.json hash before signing, raising Passkit::ValidationError on bad
+      # shapes. Disable as a temporary escape hatch if the validator rejects
+      # something Apple actually accepts; please file an issue alongside.
+      @validate_pass_json = true
       @web_service_host = ENV["PASSKIT_WEB_SERVICE_HOST"] || (raise "Please set PASSKIT_WEB_SERVICE_HOST")
       raise("PASSKIT_WEB_SERVICE_HOST must start with https://") unless @web_service_host.start_with?("https://")
       @certificate_key = ENV["PASSKIT_CERTIFICATE_KEY"] || (raise "Please set PASSKIT_CERTIFICATE_KEY")

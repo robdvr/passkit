@@ -1,15 +1,12 @@
 <p>
   Here is an example of an email message that contains a link to Download a Wallet Pass.
+  The same <code>.pkpass</code> URL works on both iOS and Android — iOS opens it in
+  Apple Wallet, Android opens it with any installed app that handles
+  <code>application/vnd.apple.pkpass</code> (e.g. Google Wallet or a third-party reader).
 </p>
 <p>
   <a href="<%= @passkit_url_generator.ios %>">
     <%= image_tag 'passkit/add_to_apple_wallet_en.png', style: 'width: 150px;' %>
-    Download an iOS Wallet Pass
-  </a>
-</p>
-<p>
-  <a href="<%=@passkit_url_generator.android %>">
-    <%= image_tag 'passkit/add_to_walletpass_en.png', style: 'width: 150px;' %>
-    Download an Android Wallet Pass
+    Download Wallet Pass
   </a>
 </p>

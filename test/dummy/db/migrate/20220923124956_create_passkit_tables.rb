@@ -1,4 +1,4 @@
-class CreatePasskitTables < ActiveRecord::Migration[7.0]
+class CreatePasskitTables < ActiveRecord::Migration[8.1]
   def change
     create_table :passkit_passes do |t|
       t.string :generator_type
