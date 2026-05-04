@@ -10,11 +10,20 @@ module Passkit
             collection_name = validated_collection_name(@generator, @payload[:collection_name])
             return head(:not_found) unless collection_name
 
-            files = @generator.public_send(collection_name).collect do |collection_item|
-              Passkit::Factory.create_pass(@payload[:pass_class], collection_item)
+            collection = @generator.public_send(collection_name)
+
+            if apple_wallet_client?
+              files = collection.collect do |collection_item|
+                Passkit::Factory.create_pass(@payload[:pass_class], collection_item)
+              end
+              file = Passkit::Generator.compress_passes_files(files)
+              send_file(file, type: "application/vnd.apple.pkpasses", disposition: "attachment")
+            else
+              # `.pkpasses` bundles are only understood by iOS Wallet. Browsers
+              # and Android third-party readers get a per-pass HTML index so
+              # the user can install each pass individually.
+              render plain: bundle_index_html(collection), content_type: "text/html"
             end
-            file = Passkit::Generator.compress_passes_files(files)
-            send_file(file, type: "application/vnd.apple.pkpasses", disposition: "attachment")
           else
             file = Passkit::Factory.create_pass(@payload[:pass_class], @generator)
             send_file(file, type: "application/vnd.apple.pkpass", disposition: "attachment")
@@ -116,6 +125,65 @@ module Passkit
           return symbol if generator.class.respond_to?(:reflect_on_association) &&
             generator.class.reflect_on_association(symbol)
           nil
+        end
+
+        # iOS Wallet identifies its UA as `PassKit/<ver>` (older iOS) or
+        # `Wallet/<ver>` (newer iOS) when fetching a pass URL. Anything else
+        # (a browser on Android, a desktop browser, a third-party reader's
+        # download fetcher) gets the HTML index instead of a `.pkpasses`
+        # bundle they cannot open.
+        def apple_wallet_client?
+          request.user_agent.to_s.match?(/\b(PassKit|Wallet)\b/)
+        end
+
+        # Per-pass URLs reuse the same encrypted-payload contract as the
+        # initial collection request, just with `collection_name` cleared
+        # and the per-item record as the generator. Each click creates one
+        # `Passkit::Pass` row, matching the single-pass code path.
+        def bundle_index_html(collection)
+          items = collection.to_a
+          links = items.map { |item| bundle_index_link(item) }.join
+
+          <<~HTML
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>Your passes</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+                     max-width: 32rem; margin: 2rem auto; padding: 0 1rem; color: #111; }
+              h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
+              p { color: #444; line-height: 1.4; }
+              ul { list-style: none; padding: 0; margin: 1.5rem 0; }
+              li { margin: 0.5rem 0; }
+              a { display: block; padding: 1rem; background: #f3f4f6;
+                  border-radius: 0.5rem; text-decoration: none; color: #111; }
+              code { background: #eee; padding: 0 0.25rem; border-radius: 0.25rem; }
+            </style>
+            </head>
+            <body>
+            <h1>Your passes (#{items.length})</h1>
+            <p>Apple's bundled <code>.pkpasses</code> format is only understood by
+            iOS Wallet, so each pass is offered separately here. Tap a pass to add
+            it to your wallet.</p>
+            <ul>#{links}</ul>
+            </body>
+            </html>
+          HTML
+        end
+
+        def bundle_index_link(item)
+          payload = Passkit::UrlEncrypt.encrypt(
+            valid_until: Passkit::PayloadGenerator::VALIDITY.from_now,
+            generator_class: item.class.name,
+            generator_id: item.id,
+            pass_class: @payload[:pass_class],
+            collection_name: nil
+          )
+          label = item.try(:name).presence || "Pass ##{item.id}"
+          %(<li><a href="#{ERB::Util.h(passes_api_path(payload))}">#{ERB::Util.h(label)}</a></li>)
         end
       end
     end

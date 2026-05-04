@@ -1,12 +1,18 @@
 # <img src="./docs/wallet.png" alt="Goboony" height="50"/> Passkit
 
-`passkit` is a Ruby gem (mountable Rails engine) for generating, signing, and serving `.pkpass` Wallet Passes that work on **both iOS and Android** — no third-party redirect required.
+`passkit` is a Ruby gem (mountable Rails engine) for generating, signing, and serving `.pkpass` Wallet Passes from a single pipeline.
 
-The same signed `.pkpass` file is served to both platforms. iOS opens it in Apple Wallet natively; Android users open it with whichever installed app handles `application/vnd.apple.pkpass` (e.g. Google Wallet or a third-party `.pkpass` reader).
+## How cross-platform support actually works
 
-Do you have a QRCode or a Barcode anywhere in your app that you want to distribute as a Wallet Pass on iOS and Android? Look no further!
+The same signed `.pkpass` file URL is served to every client. What happens next depends on the device:
 
-This gem provides everything necessary to distribute Wallet Passes in pkpass format, and gives you all the steps to follow for what we cannot provide.
+* **iOS** — Apple Wallet opens the file natively. Full PassKit Web Service integration: registration, per-device update polling, `Last-Modified`-based 304s.
+* **Android** — the device receives `application/vnd.apple.pkpass` and offers it to whichever installed app handles that MIME type. **Google Wallet does *not* natively read `.pkpass`** — users without a third-party reader (PassWallet, etc.) will see a "no app to open" dialog. There is no registration or update protocol on Android; the user gets the file once, and that's it.
+* **Bundles (`.pkpasses`)** — when `collection_name` is set on a URL, the controller branches on User-Agent. Apple Wallet UAs (`PassKit/*`, `Wallet/*`) get the spec `.pkpasses` zip. Browsers and Android clients get an HTML index instead, with one download link per pass — because no Android reader understands `.pkpasses`.
+
+**Do not** advertise this gem as "native Google Wallet" — it isn't. If you need first-class Android Wallet UX, you need a parallel Google Wallet API integration (JWT-signed event-ticket / generic-pass class objects), which this gem does not provide.
+
+Do you have a QRCode or a Barcode anywhere in your app that you want to distribute as a Wallet Pass? Look no further!
 
 **We provide:**
 
@@ -21,8 +27,8 @@ This gem provides everything necessary to distribute Wallet Passes in pkpass for
 
 * Full tests coverage: we are working on it!
 * A fancy dashboard: our dashboard is really really simple right now. Pull requests are welcome!
-* Push notifications: this is the most wanted feature I believe. Pull requests are welcome!
-* Native Google Wallet integration: on Android we serve the raw `.pkpass`; the user's installed reader (Google Wallet, PassWallet, etc.) handles it.
+* Push notifications: APNs is not implemented. `push_token` is captured by the registration endpoint but never used to send updates. Pull requests are welcome!
+* Native Google Wallet API integration: see "How cross-platform support actually works" above.
 
 ## Installation
 
@@ -134,6 +140,69 @@ Full documentation for image specifications is on Apple's
 [Pass Design and Creation](https://developer.apple.com/library/archive/documentation/UserExperience/Conceptual/PassKit_PG/Creating.html)
 page. Naming the file according to convetion and putting it in 'private/passkit/<your_downcased_passname>' is all that's needed for it
 to be included in the pass.
+
+### Event tickets
+
+Event tickets need a few things beyond the storeCard defaults to render and behave correctly. The bundled [`Passkit::UserTicket`](test/dummy/app/lib/passkit/user_ticket.rb) is a working example.
+
+**Declare the style:**
+
+```ruby
+def pass_type
+  :eventTicket
+end
+```
+
+**Required and recommended images** (drop into `private/passkit/<your_downcased_passname>/`):
+
+| File                | Required? | Notes |
+|---------------------|-----------|-------|
+| `icon.png` (+ `@2x`, `@3x`) | yes — gem raises without it | shown in notifications and Mail attachments |
+| `logo.png` (+ `@2x`)        | recommended | top-left corner |
+| `background.png` (+ `@2x`)  | choose one  | full-bleed background; iOS uses the "background+thumbnail" layout when this is present |
+| `thumbnail.png` (+ `@2x`)   | choose one  | right-side image (artist headshot, venue photo) |
+| `strip.png` (+ `@2x`)       | choose one  | banner above the fields if you don't use background |
+
+**Field layout convention** (the gem does not enforce these — Apple's renderer just truncates extras):
+
+* `primary_fields` — at most 1 (typically the event name)
+* `secondary_fields` — up to 4
+* `auxiliary_fields` — up to 4
+* `header_fields` — typically 0–1
+* `back_fields` — unlimited
+
+**Apple typed event semantics.** These are the keys iOS keys off for lock-screen surfacing, the Smart Stack widget, and Siri prompts. Without them, those integrations don't fire — the field arrays alone are not enough. Full list at [Apple's SemanticTags reference](https://developer.apple.com/documentation/walletpasses/semantictags):
+
+```ruby
+def semantics
+  {
+    eventType: "PKEventTypeLivePerformance",
+    eventName: "Showcase 2026",
+    venueName: "The Greek Theatre",
+    venueLocation: { latitude: 37.8702, longitude: -122.2553 },
+    eventStartDate: ticket.starts_at.iso8601,
+    eventEndDate:   ticket.ends_at.iso8601,
+    performerNames: ticket.performer_names,
+    seats: [{
+      seatSection: ticket.section,
+      seatRow:     ticket.row,
+      seatNumber:  ticket.number,
+      seatType:    "Reserved"
+    }]
+  }
+end
+```
+
+**Surfacing rules:**
+
+* `relevant_date` — set to the show start. iOS surfaces the pass on the lock screen around this time, independent of any geofence.
+* `locations` + `max_distance` — venue lat/long with a meters radius. iOS surfaces the pass when the device is inside the radius.
+* `beacons` — array of iBeacon `{ proximityUUID, major, minor, relevantText }`. Use for in-venue check-in proximity.
+* `grouping_identifier` — string. Multi-ticket purchases sharing the same identifier collapse into one stack in Wallet. Use the order ID.
+* `expiration_date` — ISO 8601 timestamp. Apple greys the pass out after this.
+* `voided` — boolean. Set to `true` when a ticket is cancelled / refunded; iOS will mark it voided on next update.
+
+Updates flow over the standard PassKit Web Service: when `Ticket#updated_at` advances (or your subclass overrides `last_update`), iOS Wallet's next poll picks up the new `pass.json` via `webServiceURL` + `authentication_token`.
 
 ### Serve your Wallet Pass
 

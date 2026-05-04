@@ -4,12 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this gem is
 
-`passkit` is a Ruby gem (mountable Rails engine) for generating, signing, and serving `.pkpass` Wallet Passes that work on **both iOS and Android** from a single pipeline. The same signed `.pkpass` file is served to either platform — there is no third-party redirect:
+`passkit` is a Ruby gem (mountable Rails engine) for generating, signing, and serving `.pkpass` Wallet Passes from a single pipeline. The same signed `.pkpass` URL is handed to every client; the iOS and Android stories are not symmetric and the gem does not pretend they are:
 
-- **iOS** — passes are installed natively through Apple Wallet using Apple's PassKit Web Service protocol.
-- **Android** — the raw `.pkpass` is delivered to the device; whichever installed app handles `application/vnd.apple.pkpass` (Google Wallet, PassWallet, or another third-party reader) opens it. `Passkit::UrlGenerator#android` is an alias for `#ios` and returns the same URL.
+- **iOS** — Apple Wallet opens the `.pkpass` natively. Full PassKit Web Service integration: registration, per-device update polling, `Last-Modified`-based 304s.
+- **Android** — `application/vnd.apple.pkpass` is offered to whichever installed app handles that MIME type. **Google Wallet does not natively read `.pkpass`** — the user needs a third-party reader (PassWallet, etc.). There is no registration or update protocol on Android. `Passkit::UrlGenerator#android` is an alias for `#ios`; both return the same URL.
+- **Push notifications** — not implemented on either platform. APNs is absent; `Passkit::Device#push_token` is captured by the registration endpoint but never used to send updates.
+- **Bundles (`.pkpasses`)** — `Api::V1::PassesController#create` branches on User-Agent (`apple_wallet_client?`). Apple Wallet UAs (`PassKit/*`, `Wallet/*`) get the spec `.pkpasses` zip. Browsers and Android clients get an HTML index with one link per pass — no Android reader understands the bundle format.
 
-It ships ActiveRecord models, the Apple PassKit Web Service API endpoints, a small admin dashboard, and a `Passkit::BasePass` superclass that host apps subclass to define their own passes.
+It ships ActiveRecord models, the Apple PassKit Web Service API endpoints, a small admin dashboard, and a `Passkit::BasePass` superclass that host apps subclass to define their own passes (storeCard, coupon, eventTicket, generic, boardingPass).
 
 ## Common commands
 
@@ -61,7 +63,7 @@ Autoloading uses Zeitwerk-for-gem (`Zeitwerk::Loader.for_gem`) with `lib/generat
 The pipeline is the load-bearing part of this codebase. Following one request end-to-end is the fastest way to understand the gem:
 
 1. **URL generation (host app).** `Passkit::UrlGenerator.new(MyPass, owner, :collection?)` builds a `.pkpass` download URL pointing at `passes/:payload`. The payload is built by `PayloadGenerator.hash` (`{pass_class, generator_class, generator_id, collection_name, valid_until: 30.days.from_now}`) and AES-128-CBC encrypted by `UrlEncrypt` using `PASSKIT_URL_ENCRYPTION_KEY` (or the host's `secret_key_base[0..15]` as fallback). `#ios` and `#android` return the same URL — Android opens the raw `.pkpass` with whatever local reader is installed.
-2. **Pass creation (`Api::V1::PassesController#create`).** `decrypt_payload` recovers the hash, rejects expired payloads, and `set_generator` reconstitutes the AR record. If `collection_name` is set, the controller iterates `generator.public_send(collection_name)` and bundles the results as a `.pkpasses` archive; otherwise it produces a single `.pkpass`.
+2. **Pass creation (`Api::V1::PassesController#create`).** `decrypt_payload` recovers the hash, rejects expired payloads, and `set_generator` reconstitutes the AR record. If `collection_name` is set, the controller iterates `generator.public_send(collection_name)` and either bundles the results as a `.pkpasses` archive (Apple Wallet UA) or renders an HTML index of per-pass download links (everyone else). Without `collection_name`, it produces a single `.pkpass`.
 3. **`Passkit::Factory.create_pass`** persists a `Passkit::Pass` row (which generates a `serial_number` and `authentication_token` in a `before_validation`) and hands it to `Passkit::Generator`.
 4. **`Passkit::Generator#generate_and_sign`** is the core builder. It copies the pass's image folder into `Rails.root/tmp/passkit/<file_name>/`, calls `add_other_files(path)` so the subclass can drop in dynamic images, builds `pass.json` from the subclass's overrides, computes `manifest.json` (SHA1 of every file), signs it with `OpenSSL::PKCS7.sign` using the p12 + Apple WWDR intermediate cert, and `rubyzip`s the directory into a `.pkpass`. Returned path is what `send_file` ships back.
 5. **Updates.** `PassesController#show` and `RegistrationsController` implement Apple's auth-token-protected web service so iOS can poll for changes. `last-modified` headers come from `Pass#last_update` (delegates to the subclass's `last_update`, falling back to the row's `updated_at`).
@@ -96,3 +98,13 @@ The `Passkit::Configuration` initializer **raises** unless all of these are set,
 - Optional: `PASSKIT_URL_ENCRYPTION_KEY` (else `secret_key_base[0..15]`), `PASSKIT_FORMAT_VERSION`, `PASSKIT_DASHBOARD_USERNAME` / `PASSKIT_DASHBOARD_PASSWORD`
 
 `docs/passkit_environment_variables.md` walks through obtaining the Apple certs.
+
+## Plan Mode
+
+- Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one.
+- Make the plan extremely concise. Sacrifice grammar for the sake of concision.
+- At the end of each plan, give me a list of unresolved questions to answer, if any.
+- Make sure to avoid N+1 queries.
+- Make sure the plan has security / authorization in mind and follow best practices.
+- Make sure to run rubocop and fix any lint issues.
+- Make sure that all the tests pass

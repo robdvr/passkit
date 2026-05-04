@@ -18,10 +18,11 @@ class TestPassesController < ActionDispatch::IntegrationTest
     assert_equal 7, zip_file.size
   end
 
-  def test_create_collection
+  def test_create_collection_serves_pkpasses_bundle_to_apple_wallet
     payload = Passkit::PayloadGenerator.encrypted(Passkit::UserTicket, User.find(1), :tickets)
-    get passes_api_path(payload)
+    get passes_api_path(payload), headers: {"User-Agent" => "PassKit/1.0 CFNetwork/1410 Darwin/22.0.0"}
     assert_response :success
+    assert_equal "application/vnd.apple.pkpasses", response.headers["Content-Type"].split(";").first
     assert_equal 2, Passkit::Pass.count
     unzipped_passes = Zip::File.open_buffer(StringIO.new(response.body))
     assert_equal 2, unzipped_passes.size # the main zip file contains two passes
@@ -30,6 +31,41 @@ class TestPassesController < ActionDispatch::IntegrationTest
       inner_zip = Zip::File.open_buffer(StringIO.new(entry.get_input_stream.read))
       assert_includes inner_zip.entries.map(&:name), "pass.json"
     end
+  end
+
+  def test_create_collection_serves_html_index_to_non_wallet_clients
+    # Android browsers / desktop browsers / third-party readers cannot open
+    # .pkpasses bundles. The controller must serve a per-pass HTML index so
+    # the user can install each pass individually.
+    payload = Passkit::PayloadGenerator.encrypted(Passkit::UserTicket, User.find(1), :tickets)
+    get passes_api_path(payload), headers: {"User-Agent" => "Mozilla/5.0 (Linux; Android 14)"}
+
+    assert_response :success
+    assert_equal "text/html", response.headers["Content-Type"].split(";").first
+    # No .pkpass rows are created until the user clicks an individual link.
+    assert_equal 0, Passkit::Pass.count
+
+    body = response.body
+    assert_match(/Your passes \(2\)/, body)
+    # One link per ticket in the user's collection.
+    assert_equal 2, body.scan("<a href=").length
+    # Each link points back at this same controller's per-pass route.
+    # The engine is mounted at /passkit in the dummy app, so the path is
+    # /passkit/api/v1/passes/<encrypted-payload>.
+    assert_match(%r{href="[^"]*/api/v1/passes/[A-F0-9]+"}, body)
+  end
+
+  def test_create_collection_with_empty_relation_returns_html_with_zero_items
+    empty_user = User.create!(name: "user without tickets")
+    payload = Passkit::PayloadGenerator.encrypted(Passkit::UserTicket, empty_user, :tickets)
+
+    get passes_api_path(payload), headers: {"User-Agent" => "Mozilla/5.0 (Linux; Android 14)"}
+
+    assert_response :success
+    assert_equal "text/html", response.headers["Content-Type"].split(";").first
+    assert_equal 0, Passkit::Pass.count
+    assert_match(/Your passes \(0\)/, response.body)
+    assert_equal 0, response.body.scan("<a href=").length
   end
 
   def test_show
@@ -123,7 +159,7 @@ class TestPassesController < ActionDispatch::IntegrationTest
     assert_equal 0, empty_user.tickets.count
 
     payload = Passkit::PayloadGenerator.encrypted(Passkit::UserTicket, empty_user, :tickets)
-    get passes_api_path(payload)
+    get passes_api_path(payload), headers: {"User-Agent" => "PassKit/1.0 CFNetwork/1410 Darwin/22.0.0"}
 
     # Current behavior: the controller iterates the (empty) collection, creates zero passes,
     # then compresses an empty list of files into an outer .pkpasses zip. The response
