@@ -76,74 +76,117 @@ Now is your turn. Before proceeding, you need to set these ENV variables:
 We have a [specific guide on how to get all these](docs/passkit_environment_variables.md), please follow it.
 You cannot start using this library without these variables set, and we cannot do the work for you.
 
-## Usage
+## Quick start
 
-If you followed the installation steps and you have the ENV variables set, we can start looking at what is provided for you.
+Once the engine is mounted, the migrations are run, and the env vars are set, the bundled `ExampleStoreCard` is wired up end-to-end. To verify your setup:
 
-### Dashboard
+1. Boot the host app: `bin/rails server`.
+2. Open `http://localhost:3000/passkit/dashboard/previews` (basic-auth credentials from `PASSKIT_DASHBOARD_USERNAME` / `PASSKIT_DASHBOARD_PASSWORD`).
+3. Click the download button next to `ExampleStoreCard`. You'll get a signed `.pkpass`.
+4. On macOS, double-click the file to open it in Pass Viewer; on iPhone, AirDrop it and Wallet will offer to install it.
 
-Head to `http://localhost:3000/passkit/dashboard/previews` and you will see a first `ExampleStoreCard` available for download.
-You can click on the button and you will obtain a `.pkpass` file that you can simply open or install on your phone.
-The dashboard has also a view for logs, and a view for emitted passes.
+If Pass Viewer or Wallet refuses the file, the most common cause is a cert mismatch between `PASSKIT_PASS_TYPE_IDENTIFIER` and the pass-signing certificate. See [Debug issues](#debug-issues) below.
 
-By default the dashboard is protected with basic auth. Set the credentials using these ENV variables:
-* `PASSKIT_DASHBOARD_USERNAME`
-* `PASSKIT_DASHBOARD_PASSWORD`
+## Configuration
 
-You can also change the authentication method used (see example below for Devise):
+Drop a `config/initializers/passkit.rb` (the install generator creates one for you) and customize behavior with `Passkit.configure`:
 
 ```ruby
-# config/passkit.rb
-
 Passkit.configure do |config|
+  # Optional defense-in-depth: only allow these pass classes to be served
+  # via the encrypted-payload endpoint. The payload's pass_class is matched
+  # against this list before `constantize` is called, so an attacker cannot
+  # coerce the controller into instantiating arbitrary Ruby classes.
+  # Empty array (default) means no allowlist enforcement.
+  config.pass_classes    = ["MyApp::LoyaltyCard", "MyApp::EventTicket"]
+  config.pass_generators = ["User", "Ticket"]
+
+  # Replace the default HTTP basic auth on the dashboard with whatever
+  # the host app uses (Devise / Warden shown). Block runs in the
+  # dashboard controller's instance context.
   config.authenticate_dashboard_with do
     warden.authenticate! scope: :user
-    ## redirect_to main_app.root_path unless warden.user.admin? # if you want to check a specific role
+    # redirect_to main_app.root_path unless warden.user.admin?
   end
 end
 ```
 
-### Mailer Helpers
+Strongly recommended: set `pass_classes` and `pass_generators` in production. With them empty, any class name in the (encrypted) payload will be `constantize`d — fine if your URL encryption key is not leaked, but the allowlist is cheap belt-and-suspenders.
 
-If you use mailer previews, you can create the following file in `spec/mailers/previews/passkit/example_mailer_preview.rb`:
+## Usage
+
+### Dashboard
+
+`http://localhost:3000/passkit/dashboard/previews` lists every pass class registered in `Passkit.configuration.available_passes` and offers a download for each. The dashboard also exposes:
+
+* `/passkit/dashboard/passes` — every `Passkit::Pass` row that's been generated, with serial number and the device(s) that registered for updates.
+* `/passkit/dashboard/logs` — the JSON Apple Wallet POSTs to `/passkit/api/v1/log` when something fails on-device. Invaluable for debugging signing or pass.json issues.
+
+### Create your own Wallet Pass
+
+Subclass `Passkit::BasePass` and override the fields you care about. The class name (demodulized + underscored) determines the image folder: `MyApp::EventPass` looks under `private/passkit/event_pass/`. The only image the gem strictly requires is `icon.png` — provide `icon@2x.png` / `icon@3x.png` and `logo.png` / `logo@2x.png` for proper rendering on retina screens.
+
+A minimal worked example (eventTicket — assumes a `Ticket` AR record with `event_name`, `starts_at`, `seat`, and `qr_token` columns):
 
 ```ruby
-module Passkit
-  class ExampleMailerPreview < ActionMailer::Preview
-    def example_email
-      Passkit::ExampleMailer.example_email
+# app/lib/my_app/event_pass.rb
+module MyApp
+  class EventPass < Passkit::BasePass
+    def pass_type        = :eventTicket
+    def organization_name = "Acme Events"
+    def description       = "Ticket for #{@generator.event_name}"
+    def logo_text         = @generator.event_name
+
+    # The polymorphic generator AR record passed to Factory.create_pass.
+    # Available as @generator inside any field method.
+    def primary_fields
+      [{key: "event", label: "EVENT", value: @generator.event_name}]
+    end
+
+    def secondary_fields
+      [
+        {key: "doors", label: "DOORS",
+         value: @generator.starts_at.iso8601,
+         dateStyle: "PKDateStyleNone", timeStyle: "PKDateStyleShort"},
+        {key: "seat",  label: "SEAT",  value: @generator.seat}
+      ]
+    end
+
+    def back_fields
+      [{key: "tos", label: "Terms", value: "Non-transferable. No refunds."}]
+    end
+
+    def barcodes
+      [{
+        format:          "PKBarcodeFormatQR",
+        message:         @generator.qr_token,
+        messageEncoding: "iso-8859-1",
+        altText:         "Ticket ##{@generator.id}"
+      }]
     end
   end
 end
 ```
 
-and head to `http://localhost:3000/rails/mailers/` to see an example of email with links to download the Wallet Pass.
-Please check the source code of [ExampleMailer](app/mailers/passkit/example_mailer.rb) to see how to distribute your own Wallet Passes.
+Register it so the dashboard can preview it (optional but useful in dev):
 
-### Example Passes
+```ruby
+Passkit.configure do |config|
+  config.available_passes["MyApp::EventPass"] = -> { Ticket.first }
+  config.pass_classes << "MyApp::EventPass"
+  config.pass_generators << "Ticket"
+end
+```
 
-Please check the source code of the [ExampleStoreCard](lib/passkit/example_store_card.rb) to see how to create your own Wallet Passes.
+Place your images in `private/passkit/event_pass/icon.png` (+ `@2x`, `@3x`) and you're done. Apple's [Pass Design and Creation](https://developer.apple.com/library/archive/documentation/UserExperience/Conceptual/PassKit_PG/Creating.html) page documents the image dimensions and which images each pass style supports.
 
-Again, looking at these examples, is the easiest way to get started.
+`serial_number` and `authentication_token` are generated automatically on the `Passkit::Pass` row — you do not set or pass them. Apple's pass-update protocol uses them; your code shouldn't need to touch them.
 
-### Create your own Wallet Pass
-
-You can create your own Wallet Passes by creating a new class that inherits from `Passkit::BasePass` and 
-defining the methods that you want to override.
-
-You can define colors, fields and texts. You can also define the logo and the background image.
-
-You should place the images in a 'private/passkit/<your_downcased_passname>' folder.
-There is a [dummy app in the gem](test/dummy) that you can use to check how to create your own Wallet Passes.
-
-Full documentation for image specifications is on Apple's
-[Pass Design and Creation](https://developer.apple.com/library/archive/documentation/UserExperience/Conceptual/PassKit_PG/Creating.html)
-page. Naming the file according to convetion and putting it in 'private/passkit/<your_downcased_passname>' is all that's needed for it
-to be included in the pass.
+The next section ("Event tickets") covers the eventTicket-specific fields — `semantics`, `relevant_date`, `locations`, `beacons`, `grouping_identifier` — that you'll want once the basic example is rendering correctly.
 
 ### Event tickets
 
-Event tickets need a few things beyond the storeCard defaults to render and behave correctly. The bundled [`Passkit::UserTicket`](test/dummy/app/lib/passkit/user_ticket.rb) is a working example.
+Event tickets need a few things beyond the basic field arrays above to render and behave correctly. The bundled [`Passkit::UserTicket`](test/dummy/app/lib/passkit/user_ticket.rb) is a complete working example.
 
 **Declare the style:**
 
@@ -206,21 +249,72 @@ Updates flow over the standard PassKit Web Service: when `Ticket#updated_at` adv
 
 ### Serve your Wallet Pass
 
-Use the [Passkit::UrlGenerator](lib/passkit/url_generator.rb) to generate the URL to serve your Wallet Pass.
-For one pass, you can initialize it with:
+Use [`Passkit::UrlGenerator`](lib/passkit/url_generator.rb) to build the download URL. The URL is a single AES-256-GCM-encrypted payload with a 30-day TTL — there is no separate "create" call. The pass is generated and signed lazily on first request.
+
+For a single pass, pass the class plus the AR record that drives it:
 
 ```ruby
-Passkit::UrlGenerator.new(Passkit::MyPass, User.find(1))
+Passkit::UrlGenerator.new(MyApp::LoyaltyCard, User.find(1)).ios
+# => "https://your.host/passkit/api/v1/passes/<encrypted-payload>"
 ```
 
-For one passes, you can initialize it with:
+For multiple passes (one URL serves N passes from a `has_many`), pass the association name as the third argument:
 
 ```ruby
-Passkit::UrlGenerator.new(Passkit::UserTicket, User.find(1), :tickets)
+Passkit::UrlGenerator.new(MyApp::EventTicket, User.find(1), :tickets).ios
+# => bundle URL — iOS Wallet receives a .pkpasses zip;
+#    Android/browsers receive an HTML index of one .pkpass per ticket.
 ```
-(this presumes you have `User.find(1).tickets` would return the ticket records)
 
-and then call `.ios` (or its alias `.android`) to get the URL — both return the same `.pkpass` download URL, since the same file is served to either platform. Check the example mailer included in the gem to see how to use it.
+`#ios` and `#android` return the same URL — both serve the same `.pkpass`. The android alias exists so calling code reads honestly: `url.android` makes it explicit to readers that the URL goes to a non-iOS user.
+
+### Distributing the URL (mailers, in-app, SMS)
+
+Build the URL once and embed it like any other link. The bundled [`ExampleMailer`](app/mailers/passkit/example_mailer.rb) shows the basic pattern:
+
+```ruby
+class TicketMailer < ApplicationMailer
+  def confirmation(ticket)
+    @url_generator = Passkit::UrlGenerator.new(MyApp::EventTicket, ticket)
+    mail(to: ticket.user.email, subject: "Your ticket")
+  end
+end
+```
+
+In the template:
+
+```erb
+<a href="<%= @url_generator.ios %>">Add to Apple Wallet</a>
+<a href="<%= @url_generator.android %>">Add to your Android wallet</a>
+```
+
+For mailer previews, drop a file under `spec/mailers/previews/`:
+
+```ruby
+class TicketMailerPreview < ActionMailer::Preview
+  def confirmation
+    TicketMailer.confirmation(Ticket.first)
+  end
+end
+```
+
+and view it at `http://localhost:3000/rails/mailers/`.
+
+### Pass updates flow (iOS only)
+
+When iOS Wallet installs a `.pkpass`, it registers the device against the gem's PassKit Web Service endpoints. From then on, iOS periodically polls `webServiceURL` and uses the `Last-Modified` response header to decide whether to fetch a fresh `pass.json`.
+
+The header is derived automatically: `Passkit::Pass#last_update` returns `instance.last_update || updated_at`, and `Passkit::BasePass#last_update` returns `@generator&.updated_at`. So whenever your generator AR record is `touch`ed or updated, the next poll picks up the new pass — no extra wiring needed.
+
+If you need different timing (e.g. only count specific column changes as updates), override `last_update` in your subclass:
+
+```ruby
+def last_update
+  @generator.gate_assignments.maximum(:updated_at) || @generator.updated_at
+end
+```
+
+Push notifications (APNs) to nudge devices to poll *now* are not implemented in this gem — devices update on their own polling schedule.
 
 ## Debug issues 
 
