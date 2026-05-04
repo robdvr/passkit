@@ -249,6 +249,50 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
     assert_response :no_content
   end
 
+  def test_show_with_passesUpdatedSince_preserves_time_of_day
+    # Regression: previous code used `Date.parse(passesUpdatedSince)` which
+    # silently rounded the timestamp to midnight, expanding the update window
+    # by up to 24h. Two passes 6h apart with the cutoff falling between them
+    # must return only the newer one.
+    travel_to Time.zone.parse("2026-05-03T15:00:00Z") do
+      Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+      Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+      old_pass, new_pass = Passkit::Pass.order(:id).to_a
+      [old_pass, new_pass].each { |p| register_pass(p) }
+      old_pass.update_columns(updated_at: Time.zone.parse("2026-05-03T08:00:00Z"))
+      new_pass.update_columns(updated_at: Time.zone.parse("2026-05-03T14:00:00Z"))
+
+      get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: 1),
+        params: {passesUpdatedSince: "2026-05-03T12:00:00Z"}
+
+      assert_response :ok
+      body = JSON.parse(response.body)
+      assert_equal [new_pass.serial_number], body["serialNumbers"]
+      refute_includes body["serialNumbers"], old_pass.serial_number,
+        "old pass updated at 08:00 must NOT be returned for cutoff 12:00 — Date.parse rounding bug regressed"
+    end
+  end
+
+  def test_show_lastUpdated_round_trips_through_subsequent_request
+    # The `lastUpdated` value Apple round-trips back as `passesUpdatedSince`
+    # must be a string `Time.zone.parse` can decode losslessly. Pin that the
+    # response payload is an ISO 8601 string, not a `Time` instance whose
+    # `to_s` would have a Ruby-specific format.
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+    register_pass(pass)
+
+    get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: 1),
+      params: {passesUpdatedSince: "2000-01-01T00:00:00Z"}
+
+    assert_response :ok
+    body = JSON.parse(response.body)
+    last_updated = body["lastUpdated"]
+    assert last_updated.is_a?(String), "lastUpdated must be a String — got #{last_updated.class}"
+    parsed = Time.zone.parse(last_updated)
+    refute_nil parsed, "lastUpdated #{last_updated.inspect} must round-trip through Time.zone.parse"
+  end
+
   def test_show_with_passesUpdatedSince_filters_at_sql_level_not_in_ruby
     # Runtime guard: count the SELECT against passkit_passes during the
     # request and assert it includes a WHERE on updated_at. Using a callback

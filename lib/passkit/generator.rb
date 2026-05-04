@@ -14,6 +14,7 @@ module Passkit
       create_temporary_directory
       copy_pass_to_tmp_location
       @pass.instance.add_other_files(@temporary_path)
+      Passkit::Localization.write_strings(@temporary_path, @pass.localized_strings)
       clean_ds_store_files
       I18n.with_locale(@pass.language) do
         generate_json_pass
@@ -90,13 +91,39 @@ module Passkit
       end
       pass[:appLaunchURL] = @pass.app_launch_url if @pass.app_launch_url
       pass[:associatedStoreIdentifiers] = @pass.associated_store_identifiers unless @pass.associated_store_identifiers.empty?
+      pass[:auxiliaryStoreIdentifiers] = @pass.auxiliary_store_identifiers unless @pass.auxiliary_store_identifiers.empty?
       pass[:beacons] = @pass.beacons unless @pass.beacons.empty?
       pass[:expirationDate] = @pass.expiration_date if @pass.expiration_date
       pass[:groupingIdentifier] = @pass.grouping_identifier if @pass.grouping_identifier
       pass[:nfc] = @pass.nfc if @pass.nfc
       pass[:relevantDate] = @pass.relevant_date if @pass.relevant_date
+      pass[:relevantDates] = @pass.relevant_dates unless @pass.relevant_dates.empty?
       pass[:semantics] = @pass.semantics if @pass.semantics
       pass[:userInfo] = @pass.user_info if @pass.user_info
+
+      # iOS 18+ enhanced (poster-style) event ticket fields. All optional;
+      # omitted unless the subclass overrides the corresponding method.
+      pass[:preferredStyleSchemes] = @pass.preferred_style_schemes if @pass.preferred_style_schemes
+      pass[:additionalInfoFields] = @pass.additional_info_fields unless @pass.additional_info_fields.empty?
+      pass[:eventLogoText] = @pass.event_logo_text if @pass.event_logo_text
+      pass[:useAutomaticColors] = @pass.use_automatic_colors unless @pass.use_automatic_colors.nil?
+      pass[:footerBackgroundColor] = @pass.footer_background_color if @pass.footer_background_color
+
+      # Venue utility URLs (iOS 18+).
+      pass[:bagPolicyURL] = @pass.bag_policy_url if @pass.bag_policy_url
+      pass[:parkingInformationURL] = @pass.parking_information_url if @pass.parking_information_url
+      pass[:merchandiseURL] = @pass.merchandise_url if @pass.merchandise_url
+      pass[:orderFoodURL] = @pass.order_food_url if @pass.order_food_url
+      pass[:transitInformationURL] = @pass.transit_information_url if @pass.transit_information_url
+      pass[:directionsInformationURL] = @pass.directions_information_url if @pass.directions_information_url
+      pass[:transferURL] = @pass.transfer_url if @pass.transfer_url
+      pass[:addOnURL] = @pass.add_on_url if @pass.add_on_url
+      pass[:accessibilityURL] = @pass.accessibility_url if @pass.accessibility_url
+      pass[:purchaseParkingURL] = @pass.purchase_parking_url if @pass.purchase_parking_url
+      pass[:sellURL] = @pass.sell_url if @pass.sell_url
+      pass[:contactVenueEmail] = @pass.contact_venue_email if @pass.contact_venue_email
+      pass[:contactVenuePhoneNumber] = @pass.contact_venue_phone_number if @pass.contact_venue_phone_number
+      pass[:contactVenueWebsite] = @pass.contact_venue_website if @pass.contact_venue_website
 
       pass[@pass.pass_type] = {
         headerFields: @pass.header_fields,
@@ -109,6 +136,8 @@ module Passkit
       if @pass.pass_type == :boardingPass && @pass.boarding_pass
         pass[:boardingPass] = pass[:boardingPass].merge(@pass.boarding_pass)
       end
+
+      Passkit::Validator.validate!(pass) if Passkit.configuration&.validate_pass_json
 
       File.write(@temporary_path.join("pass.json"), pass.to_json)
     end

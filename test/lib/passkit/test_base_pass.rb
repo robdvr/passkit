@@ -261,6 +261,54 @@ class TestBasePass < ActiveSupport::TestCase
     assert_match(/\A[0-9a-f-]{36}\z/, first)
   end
 
+  # ---- iOS 18+ ENHANCED EVENT TICKET DEFAULTS ----
+
+  def test_preferred_style_schemes_default_nil
+    assert_nil @subject.preferred_style_schemes
+  end
+
+  def test_additional_info_fields_default_empty_array
+    assert_equal [], @subject.additional_info_fields
+  end
+
+  def test_event_logo_text_default_nil
+    assert_nil @subject.event_logo_text
+  end
+
+  def test_relevant_dates_default_empty_array
+    assert_equal [], @subject.relevant_dates
+  end
+
+  def test_use_automatic_colors_default_nil
+    assert_nil @subject.use_automatic_colors
+  end
+
+  def test_footer_background_color_default_nil
+    assert_nil @subject.footer_background_color
+  end
+
+  def test_auxiliary_store_identifiers_default_empty_array
+    assert_equal [], @subject.auxiliary_store_identifiers
+  end
+
+  %i[
+    bag_policy_url parking_information_url merchandise_url order_food_url
+    transit_information_url directions_information_url transfer_url add_on_url
+    accessibility_url purchase_parking_url sell_url
+    contact_venue_email contact_venue_phone_number contact_venue_website
+  ].each do |method|
+    define_method("test_#{method}_default_nil") do
+      assert_nil @subject.public_send(method),
+        "expected BasePass##{method} to default to nil so subclasses opt in"
+    end
+  end
+
+  # ---- LOCALIZATION DEFAULT ----
+
+  def test_localized_strings_default_empty_hash
+    assert_equal({}, @subject.localized_strings)
+  end
+
   def teardown
     if @created_rails_dir && File.directory?(@created_rails_dir)
       FileUtils.rm_rf(@created_rails_dir)

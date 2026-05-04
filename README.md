@@ -25,7 +25,6 @@ Do you have a QRCode or a Barcode anywhere in your app that you want to distribu
 
 **We don't provide (yet):**
 
-* Full tests coverage: we are working on it!
 * A fancy dashboard: our dashboard is really really simple right now. Pull requests are welcome!
 * Push notifications: APNs is not implemented. `push_token` is captured by the registration endpoint but never used to send updates. Pull requests are welcome!
 * Native Google Wallet API integration: see "How cross-platform support actually works" above.
@@ -201,10 +200,13 @@ end
 | File                | Required? | Notes |
 |---------------------|-----------|-------|
 | `icon.png` (+ `@2x`, `@3x`) | yes — gem raises without it | shown in notifications and Mail attachments |
-| `logo.png` (+ `@2x`)        | recommended | top-left corner |
-| `background.png` (+ `@2x`)  | choose one  | full-bleed background; iOS uses the "background+thumbnail" layout when this is present |
+| `logo.png` (+ `@2x`)        | recommended | top-left corner (legacy layout) |
+| `background.png` (+ `@2x`)  | choose one  | full-bleed background (legacy `background + thumbnail` layout) |
 | `thumbnail.png` (+ `@2x`)   | choose one  | right-side image (artist headshot, venue photo) |
 | `strip.png` (+ `@2x`)       | choose one  | banner above the fields if you don't use background |
+| iOS 18+ poster-style images | optional    | full-bleed event poster + branded event logo for the enhanced layout. See note below. |
+
+> **Poster-style image filenames are not pinned in Apple's public docs.** Different references use `artwork.png`, `eventStrip.png`, and `eventLogo.png` interchangeably. The gem's `Generator` copies *every* file in `pass_path` recursively into the signed `.pkpass`, so supply whichever filenames your target iOS version expects — there's no asset-name validation to fight. If you discover the canonical name for your iOS version, contributing it back here helps the next person.
 
 **Field layout convention** (the gem does not enforce these — Apple's renderer just truncates extras):
 
@@ -246,6 +248,101 @@ end
 * `voided` — boolean. Set to `true` when a ticket is cancelled / refunded; iOS will mark it voided on next update.
 
 Updates flow over the standard PassKit Web Service: when `Ticket#updated_at` advances (or your subclass overrides `last_update`), iOS Wallet's next poll picks up the new `pass.json` via `webServiceURL` + `authentication_token`.
+
+#### Enhanced (iOS 18+) event tickets
+
+iOS 18 introduced a poster-style event ticket layout: full-bleed background, prominent event logo lockup, additional info rows in the detail view, and tappable venue utility URLs (parking, food, bag policy, etc.). It is **opt-in** via `preferred_style_schemes` — passes that don't set it render the legacy card layout. iOS ≤17 ignores the new keys and falls back to the legacy layout, so populating both code paths gives you a single pass that renders correctly on every supported iOS version.
+
+```ruby
+# app/lib/my_app/concert_ticket.rb
+class MyApp::ConcertTicket < Passkit::BasePass
+  def pass_type             = :eventTicket
+  def preferred_style_schemes = ["posterEventTicket"]
+  def event_logo_text       = "FEST 2026"
+
+  # Detail-view rows (iOS 18+).
+  def additional_info_fields
+    [
+      { key: "doors",    label: "DOORS",    value: ticket.doors_at.iso8601,
+        dateStyle: "PKDateStyleNone", timeStyle: "PKDateStyleShort" },
+      { key: "duration", label: "DURATION", value: "Approx. 3 hours" }
+    ]
+  end
+
+  # iOS 18+ relevance windows (each capped at 24h by Apple). Both
+  # `relevant_date` and `relevant_dates` may be set; iOS 18+ prefers the plural.
+  def relevant_dates
+    [{ startDate: ticket.starts_at.iso8601, endDate: ticket.ends_at.iso8601 }]
+  end
+
+  # Venue utility URLs — surface as tappable rows in the detail view.
+  def bag_policy_url           = "https://venue.example.com/bag-policy"
+  def parking_information_url  = "https://venue.example.com/parking"
+  def merchandise_url          = "https://venue.example.com/merch"
+  def contact_venue_email      = "venue@example.com"
+  def contact_venue_phone_number = "+15555550100"
+end
+```
+
+The enhanced layout keys off the typed semantic tags. Without these, the lock-screen surfacing, Live Activities, and Smart Stack integrations don't fire — populate the same `semantics` hash you'd use for the legacy layout, plus the iOS 18+ additions:
+
+```ruby
+def semantics
+  {
+    eventType: "PKEventTypeLivePerformance",
+    eventName: "Showcase 2026",
+    genre: "Live Performance",
+    venueName: "The Greek Theatre",
+    venueLocation: { latitude: 37.8702, longitude: -122.2553 },
+    venueEntrance: { latitude: 37.8704, longitude: -122.2555 }, # iOS 18+
+    venueDoorsOpenDate: ticket.doors_at.iso8601,                 # iOS 18+
+    eventStartDate:    ticket.starts_at.iso8601,
+    eventEndDate:      ticket.ends_at.iso8601,
+    performerNames:    ticket.performer_names,
+    attendeeName:      user.name,                                # iOS 18+
+    admissionLevel:    "General Admission",                      # iOS 18+
+    admissionLevelAbbreviation: "GA",                            # iOS 18+
+    seats: [{ seatSection: ticket.section, seatRow: ticket.row,
+              seatNumber: ticket.number,   seatType: "Reserved" }]
+  }
+end
+```
+
+**Caveats:**
+
+* The poster-style layout requires iOS 18 or later. On iOS ≤17 the new keys are silently ignored and Wallet renders the legacy `header/primary/secondary/auxiliary` field arrays — keep them populated.
+* NFC may be required for the poster style to actually activate (community-reported, not Apple-documented). If your test pass installs but renders as the legacy card on iOS 18+, populate `nfc` (`{ message:, encryptionPublicKey:, requiresAuthentication: }`) and re-test.
+* The `Passkit::Validator` runs every generated `pass.json` through a schema check before signing. If you hit a `Passkit::ValidationError` on a shape Apple actually accepts, set `Passkit.configuration.validate_pass_json = false` as a temporary escape hatch and file an issue.
+
+The bundled [`Passkit::UserTicket`](test/dummy/app/lib/passkit/user_ticket.rb) is a complete enhanced-layout reference — it sets every iOS 18+ key, populates the expanded semantic tags, ships venue utility URLs, and includes English + Spanish localized strings (next section).
+
+#### Localized event tickets
+
+Wallet substitutes field `value`s at render time per the device language using `<lang>.lproj/pass.strings` files inside the signed `.pkpass`. Declare translations on your subclass and the gem writes the files for you:
+
+```ruby
+class MyApp::ConcertTicket < Passkit::BasePass
+  # Default locale used for `I18n.with_locale` during generation. Optional —
+  # leave nil to fall back to the host app's default.
+  def language = "en"
+
+  def localized_strings
+    {
+      en: { "EVENT" => "Event",  "DOORS" => "Doors",   "SEAT" => "Seat" },
+      es: { "EVENT" => "Evento", "DOORS" => "Puertas", "SEAT" => "Asiento" },
+      fr: { "EVENT" => "Événement", "DOORS" => "Portes", "SEAT" => "Siège" }
+    }
+  end
+
+  # Reference the localization keys as field `value`s. Wallet substitutes
+  # them at render time per the device's preferred language.
+  def primary_fields
+    [{ key: "event", label: "EVENT", value: "EVENT" }]
+  end
+end
+```
+
+Locales the device doesn't request fall back to whatever literal string is in the field `value` — so if a German user installs the pass above, "EVENT" appears verbatim. Add a `de:` entry to `localized_strings` to localize for them. Per-language images are out of scope for the helper today; drop them into the pass folder via `add_other_files(path)` if you need them.
 
 ### Serve your Wallet Pass
 

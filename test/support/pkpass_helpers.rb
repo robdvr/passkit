@@ -92,7 +92,12 @@ module PkpassHelpers
 
   FIELD_BLOCK_SUBKEYS = %w[headerFields primaryFields secondaryFields auxiliaryFields backFields].freeze
 
-  def assert_valid_pass_json(pass_json, pass_type:)
+  # `enhanced_event_ticket: true` additionally asserts the iOS 18+ poster-style
+  # keys (`preferredStyleSchemes`, `eventLogoText`, `additionalInfoFields`,
+  # `relevantDates`) are present and well-shaped — used by the lifecycle test
+  # for the upgraded UserTicket. Default `false` keeps existing call sites
+  # working.
+  def assert_valid_pass_json(pass_json, pass_type:, enhanced_event_ticket: false)
     raise ArgumentError, "pass_json must be Hash, got #{pass_json.class}" unless pass_json.is_a?(Hash)
 
     ALWAYS_REQUIRED_KEYS.each do |key|
@@ -144,6 +149,32 @@ module PkpassHelpers
       raise "relevantDate must be ISO8601 String" unless pass_json["relevantDate"].is_a?(String) && parseable_iso8601?(pass_json["relevantDate"])
     end
 
+    assert_enhanced_event_ticket_keys!(pass_json) if enhanced_event_ticket
+
+    true
+  end
+
+  def assert_enhanced_event_ticket_keys!(pass_json)
+    raise "enhanced eventTicket: preferredStyleSchemes missing" unless pass_json["preferredStyleSchemes"].is_a?(Array)
+    raise "enhanced eventTicket: preferredStyleSchemes must include 'posterEventTicket'" unless pass_json["preferredStyleSchemes"].include?("posterEventTicket")
+    raise "enhanced eventTicket: eventLogoText missing or wrong type" unless pass_json["eventLogoText"].is_a?(String)
+    raise "enhanced eventTicket: additionalInfoFields must be non-empty Array" unless pass_json["additionalInfoFields"].is_a?(Array) && !pass_json["additionalInfoFields"].empty?
+    pass_json["additionalInfoFields"].each_with_index do |f, i|
+      raise "enhanced eventTicket: additionalInfoFields[#{i}].key/value required" unless f.is_a?(Hash) && f["key"].is_a?(String) && !f["value"].nil?
+    end
+    raise "enhanced eventTicket: relevantDates must be non-empty Array" unless pass_json["relevantDates"].is_a?(Array) && !pass_json["relevantDates"].empty?
+    pass_json["relevantDates"].each_with_index do |d, i|
+      raise "enhanced eventTicket: relevantDates[#{i}].startDate must be ISO 8601" unless d.is_a?(Hash) && parseable_iso8601?(d["startDate"])
+    end
+    sem = pass_json["semantics"]
+    raise "enhanced eventTicket: semantics must be Hash" unless sem.is_a?(Hash)
+    raise "enhanced eventTicket: semantics.eventName required" unless sem["eventName"].is_a?(String)
+    raise "enhanced eventTicket: semantics.eventType required" unless sem["eventType"].is_a?(String) && sem["eventType"].start_with?("PKEventType")
+    raise "enhanced eventTicket: semantics.venueName required" unless sem["venueName"].is_a?(String)
+    raise "enhanced eventTicket: semantics.venueLocation required" unless sem["venueLocation"].is_a?(Hash)
+    %w[eventStartDate eventEndDate].each do |k|
+      raise "enhanced eventTicket: semantics.#{k} must be ISO 8601" unless parseable_iso8601?(sem[k])
+    end
     true
   end
 

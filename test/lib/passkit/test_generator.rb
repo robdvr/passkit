@@ -230,11 +230,13 @@ class TestGenerator < ActiveSupport::TestCase
     refute read_pass_json(path).key?("groupingIdentifier")
   end
 
-  # nfc
+  # nfc — Apple requires both `message` and `encryptionPublicKey` when
+  # `nfc` is present (validator enforces this).
   def test_pass_json_includes_nfc_when_set
-    path = with_subclass { define_method(:nfc) { {message: "hello"} } }
+    nfc = {message: "hello", encryptionPublicKey: "BFakePublicKey=="}
+    path = with_subclass { define_method(:nfc) { nfc } }
     json = read_pass_json(path)
-    assert_equal({"message" => "hello"}, json["nfc"])
+    assert_equal({"message" => "hello", "encryptionPublicKey" => "BFakePublicKey=="}, json["nfc"])
   end
 
   def test_pass_json_omits_nfc_when_nil
@@ -254,9 +256,10 @@ class TestGenerator < ActiveSupport::TestCase
     refute read_pass_json(path).key?("relevantDate")
   end
 
-  # semantics
+  # semantics — CurrencyAmount requires both `amount` and `currencyCode`
+  # per Apple's spec (validator enforces this).
   def test_pass_json_includes_semantics_when_set
-    path = with_subclass { define_method(:semantics) { {balance: {amount: "1"}} } }
+    path = with_subclass { define_method(:semantics) { {balance: {amount: "1", currencyCode: "USD"}} } }
     json = read_pass_json(path)
     assert json["semantics"].is_a?(Hash)
   end
@@ -705,5 +708,168 @@ class TestGenerator < ActiveSupport::TestCase
         assert json[type.to_s].key?(sub), "pass.json #{type}.#{sub} must be present"
       end
     end
+  end
+
+  # ------------------------------------------------------------------
+  # iOS 18+ enhanced event ticket fields — include/omit pattern
+  # ------------------------------------------------------------------
+
+  def test_pass_json_includes_preferredStyleSchemes_when_set
+    path = with_subclass { define_method(:preferred_style_schemes) { ["posterEventTicket"] } }
+    assert_equal ["posterEventTicket"], read_pass_json(path)["preferredStyleSchemes"]
+  end
+
+  def test_pass_json_omits_preferredStyleSchemes_when_nil
+    path = with_subclass { define_method(:preferred_style_schemes) { nil } }
+    refute read_pass_json(path).key?("preferredStyleSchemes")
+  end
+
+  def test_pass_json_includes_additionalInfoFields_when_non_empty
+    fields = [{key: "doors", label: "DOORS", value: "7pm"}]
+    path = with_subclass { define_method(:additional_info_fields) { fields } }
+    json = read_pass_json(path)
+    assert_equal 1, json["additionalInfoFields"].size
+    assert_equal "doors", json["additionalInfoFields"][0]["key"]
+  end
+
+  def test_pass_json_omits_additionalInfoFields_when_empty
+    path = with_subclass { define_method(:additional_info_fields) { [] } }
+    refute read_pass_json(path).key?("additionalInfoFields")
+  end
+
+  def test_pass_json_includes_eventLogoText_when_set
+    path = with_subclass { define_method(:event_logo_text) { "FEST 2026" } }
+    assert_equal "FEST 2026", read_pass_json(path)["eventLogoText"]
+  end
+
+  def test_pass_json_omits_eventLogoText_when_nil
+    path = with_subclass { define_method(:event_logo_text) { nil } }
+    refute read_pass_json(path).key?("eventLogoText")
+  end
+
+  def test_pass_json_includes_relevantDates_when_non_empty
+    dates = [{startDate: "2030-01-01T12:00:00+00:00", endDate: "2030-01-01T15:00:00+00:00"}]
+    path = with_subclass { define_method(:relevant_dates) { dates } }
+    json = read_pass_json(path)
+    assert_equal 1, json["relevantDates"].size
+    assert_equal "2030-01-01T12:00:00+00:00", json["relevantDates"][0]["startDate"]
+  end
+
+  def test_pass_json_omits_relevantDates_when_empty
+    path = with_subclass { define_method(:relevant_dates) { [] } }
+    refute read_pass_json(path).key?("relevantDates")
+  end
+
+  def test_pass_json_includes_useAutomaticColors_when_true
+    path = with_subclass { define_method(:use_automatic_colors) { true } }
+    assert_equal true, read_pass_json(path)["useAutomaticColors"]
+  end
+
+  def test_pass_json_includes_useAutomaticColors_when_false
+    # Distinct from `nil` — `false` is a valid value to write.
+    path = with_subclass { define_method(:use_automatic_colors) { false } }
+    assert_equal false, read_pass_json(path)["useAutomaticColors"]
+  end
+
+  def test_pass_json_omits_useAutomaticColors_when_nil
+    path = with_subclass { define_method(:use_automatic_colors) { nil } }
+    refute read_pass_json(path).key?("useAutomaticColors")
+  end
+
+  def test_pass_json_includes_footerBackgroundColor_when_set
+    path = with_subclass { define_method(:footer_background_color) { "rgb(10, 20, 30)" } }
+    assert_equal "rgb(10, 20, 30)", read_pass_json(path)["footerBackgroundColor"]
+  end
+
+  def test_pass_json_omits_footerBackgroundColor_when_nil
+    path = with_subclass { define_method(:footer_background_color) { nil } }
+    refute read_pass_json(path).key?("footerBackgroundColor")
+  end
+
+  def test_pass_json_includes_auxiliaryStoreIdentifiers_when_non_empty
+    path = with_subclass { define_method(:auxiliary_store_identifiers) { [42, 99] } }
+    assert_equal [42, 99], read_pass_json(path)["auxiliaryStoreIdentifiers"]
+  end
+
+  def test_pass_json_omits_auxiliaryStoreIdentifiers_when_empty
+    path = with_subclass { define_method(:auxiliary_store_identifiers) { [] } }
+    refute read_pass_json(path).key?("auxiliaryStoreIdentifiers")
+  end
+
+  # Venue utility URLs — pinned name+JSON-key mapping for each.
+  {
+    bag_policy_url: ["bagPolicyURL", "https://example.com/bag"],
+    parking_information_url: ["parkingInformationURL", "https://example.com/parking"],
+    merchandise_url: ["merchandiseURL", "https://example.com/merch"],
+    order_food_url: ["orderFoodURL", "https://example.com/food"],
+    transit_information_url: ["transitInformationURL", "https://example.com/transit"],
+    directions_information_url: ["directionsInformationURL", "https://example.com/dirs"],
+    transfer_url: ["transferURL", "https://example.com/transfer"],
+    add_on_url: ["addOnURL", "https://example.com/addon"],
+    accessibility_url: ["accessibilityURL", "https://example.com/a11y"],
+    purchase_parking_url: ["purchaseParkingURL", "https://example.com/buy-parking"],
+    sell_url: ["sellURL", "https://example.com/sell"],
+    contact_venue_email: ["contactVenueEmail", "venue@example.com"],
+    contact_venue_phone_number: ["contactVenuePhoneNumber", "+15555550100"],
+    contact_venue_website: ["contactVenueWebsite", "https://example.com/venue"]
+  }.each do |method, (json_key, value)|
+    define_method("test_pass_json_includes_#{json_key}_when_set") do
+      path = with_subclass { define_method(method) { value } }
+      assert_equal value, read_pass_json(path)[json_key]
+    end
+
+    define_method("test_pass_json_omits_#{json_key}_when_nil") do
+      path = with_subclass { define_method(method) { nil } }
+      refute read_pass_json(path).key?(json_key)
+    end
+  end
+
+  # ------------------------------------------------------------------
+  # Validator integration
+  # ------------------------------------------------------------------
+
+  def test_generator_invokes_validator_when_config_enabled
+    Passkit.configuration.validate_pass_json = true
+    err = assert_raises(Passkit::ValidationError) do
+      with_subclass { define_method(:foreground_color) { "blue" } }
+    end
+    assert_match(/foregroundColor must match rgb/, err.message)
+  ensure
+    Passkit.configuration.validate_pass_json = true
+  end
+
+  def test_generator_skips_validator_when_config_disabled
+    Passkit.configuration.validate_pass_json = false
+    # Bad color shape would otherwise raise; with validation off, generation
+    # succeeds and the bad value is written to pass.json verbatim.
+    path = with_subclass { define_method(:foreground_color) { "blue" } }
+    assert_equal "blue", read_pass_json(path)["foregroundColor"]
+  ensure
+    Passkit.configuration.validate_pass_json = true
+  end
+
+  # ------------------------------------------------------------------
+  # Localization integration
+  # ------------------------------------------------------------------
+
+  def test_generator_writes_pass_strings_files_into_pkpass
+    translations = {en: {"K" => "V"}, es: {"K" => "Valor"}}
+    path = with_subclass { define_method(:localized_strings) { translations } }
+    pkpass = PkpassHelpers.read_pkpass(path)
+    assert_includes pkpass[:entry_names], "en.lproj/pass.strings"
+    assert_includes pkpass[:entry_names], "es.lproj/pass.strings"
+  end
+
+  def test_generator_skips_lproj_when_localized_strings_empty
+    path = with_subclass { define_method(:localized_strings) { {} } }
+    pkpass = PkpassHelpers.read_pkpass(path)
+    refute pkpass[:entry_names].any? { |n| n.end_with?("pass.strings") }
+  end
+
+  def test_pass_strings_files_appear_in_manifest_with_correct_sha1
+    path = with_subclass { define_method(:localized_strings) { {en: {"K" => "V"}} } }
+    pkpass = PkpassHelpers.read_pkpass(path)
+    expected_sha = Digest::SHA1.hexdigest(pkpass[:entry_bytes]["en.lproj/pass.strings"])
+    assert_equal expected_sha, pkpass[:manifest]["en.lproj/pass.strings"]
   end
 end

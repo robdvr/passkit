@@ -131,14 +131,24 @@ class TestFullPassLifecycle < ActionDispatch::IntegrationTest
 
     # 7) The `.pkpass` is structurally + cryptographically valid. Signature
     #    verifies against the test CA, manifest hashes match every entry,
-    #    pass.json passes Apple's schema for eventTicket.
+    #    pass.json passes Apple's schema for eventTicket and the iOS 18+
+    #    enhanced poster-style key shapes.
     pkpass = PkpassHelpers.read_pkpass(response.body)
     PkpassHelpers::REQUIRED_PKPASS_ENTRIES.each { |req| assert_includes pkpass[:entry_names], req }
     assert pkpass[:entry_names].any? { |n| n == "icon.png" }
     assert PkpassHelpers.verify_pkpass_signature!(pkpass)
-    assert PkpassHelpers.assert_valid_pass_json(pkpass[:pass_json], pass_type: :eventTicket)
+    assert PkpassHelpers.assert_valid_pass_json(pkpass[:pass_json], pass_type: :eventTicket, enhanced_event_ticket: true)
 
-    # 8) A Pass row was persisted exactly once for this click.
+    # 8) Localized `pass.strings` files are present in the manifest with
+    #    matching SHA1 hashes (lifecycle includes the localization helper).
+    %w[en.lproj/pass.strings es.lproj/pass.strings].each do |path|
+      assert_includes pkpass[:entry_names], path, "expected #{path} in .pkpass entries"
+      expected = Digest::SHA1.hexdigest(pkpass[:entry_bytes][path])
+      assert_equal expected, pkpass[:manifest][path],
+        "manifest hash for #{path} must equal SHA1 of the file bytes"
+    end
+
+    # 9) A Pass row was persisted exactly once for this click.
     assert_equal 1, Passkit::Pass.count
   end
 end

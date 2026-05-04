@@ -81,16 +81,23 @@ module Passkit
           passes = @device.passes
           return passes unless params[:passesUpdatedSince]&.present?
 
+          # `Time.zone.parse` preserves H:M:S; the previous `Date.parse` rounded
+          # to midnight, expanding the update window by up to 24h and surfacing
+          # passes Apple should not have re-fetched.
           since = begin
-            Date.parse(params[:passesUpdatedSince])
+            Time.zone.parse(params[:passesUpdatedSince])
           rescue ArgumentError, TypeError
             return passes
           end
+          return passes if since.nil?
+
           passes.where("passkit_passes.updated_at >= ?", since)
         end
 
         def updatable_passes(passes)
-          {lastUpdated: Time.zone.now, serialNumbers: passes.pluck(:serial_number)}
+          # Round-trip back through `Time.zone.parse` next call requires an
+          # ISO 8601 string, not a Time instance.
+          {lastUpdated: Time.zone.now.iso8601, serialNumbers: passes.pluck(:serial_number)}
         end
 
         def push_token
