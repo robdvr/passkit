@@ -144,4 +144,56 @@ class TestUrlEncrypt < Minitest::Test
     tampered[tag_offset] = ((tampered[tag_offset] == "0") ? "1" : "0")
     assert_raises(OpenSSL::Cipher::CipherError) { Passkit::UrlEncrypt.decrypt(tampered) }
   end
+
+  # ------------------------------------------------------------------
+  # Format-length boundary
+  # ------------------------------------------------------------------
+
+  def test_decrypt_rejects_payload_at_minimum_length_with_no_ciphertext
+    # Format requires `length > VERSION_BYTE.length + IV_HEX_LEN + AUTH_TAG_HEX_LEN`
+    # (strict, not >=). At exact boundary length there's no ciphertext to
+    # decrypt — must raise rather than crash with an obscure OpenSSL error.
+    boundary_len = Passkit::UrlEncrypt::VERSION_BYTE.length +
+      Passkit::UrlEncrypt::IV_HEX_LEN +
+      Passkit::UrlEncrypt::AUTH_TAG_HEX_LEN
+    boundary = Passkit::UrlEncrypt::VERSION_BYTE + ("A" * (boundary_len - Passkit::UrlEncrypt::VERSION_BYTE.length))
+    assert_equal boundary_len, boundary.length
+    assert_raises(OpenSSL::Cipher::CipherError) { Passkit::UrlEncrypt.decrypt(boundary) }
+  end
+
+  def test_decrypt_rejects_payload_below_minimum_length
+    # 1 char short of the version+IV+tag minimum.
+    short = Passkit::UrlEncrypt::VERSION_BYTE + ("A" * (Passkit::UrlEncrypt::IV_HEX_LEN + Passkit::UrlEncrypt::AUTH_TAG_HEX_LEN - 1))
+    assert_raises(OpenSSL::Cipher::CipherError) { Passkit::UrlEncrypt.decrypt(short) }
+  end
+
+  def test_decrypt_rejects_non_string_input
+    [nil, 42, [], {}].each do |bad|
+      assert_raises(OpenSSL::Cipher::CipherError) do
+        Passkit::UrlEncrypt.decrypt(bad)
+      end
+    end
+  end
+
+  # ------------------------------------------------------------------
+  # Parameterized section corruption — pin tampering detection across
+  # every distinct region of the ciphertext.
+  # ------------------------------------------------------------------
+
+  def test_decrypt_rejects_corruption_in_each_section_individually
+    encrypted = Passkit::UrlEncrypt.encrypt({foo: "0123456789ABCDEFGHIJ"})
+    iv_offset = Passkit::UrlEncrypt::VERSION_BYTE.length
+    tag_offset = iv_offset + Passkit::UrlEncrypt::IV_HEX_LEN
+    ct_offset = tag_offset + Passkit::UrlEncrypt::AUTH_TAG_HEX_LEN
+
+    # Corrupt one nibble inside each region. Each must independently fail
+    # the auth check and raise.
+    {iv: iv_offset, tag: tag_offset, ciphertext: ct_offset}.each do |label, offset|
+      corrupted = encrypted.dup
+      corrupted[offset] = ((corrupted[offset] == "0") ? "1" : "0")
+      assert_raises(OpenSSL::Cipher::CipherError, "tampering of #{label} should be detected") do
+        Passkit::UrlEncrypt.decrypt(corrupted)
+      end
+    end
+  end
 end

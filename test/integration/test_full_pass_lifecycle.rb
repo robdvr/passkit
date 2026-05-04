@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "rails_helper"
+require_relative "../support/pkpass_helpers"
 
 class TestFullPassLifecycle < ActionDispatch::IntegrationTest
   include Passkit::Engine.routes.url_helpers
@@ -76,5 +77,68 @@ class TestFullPassLifecycle < ActionDispatch::IntegrationTest
     # 9) After unregister, registrations index returns 204.
     get device_registrations_path(device_id: device_identifier, pass_type_id: pass.pass_type_identifier)
     assert_response :no_content
+  end
+
+  # End-to-end Android-flavored lifecycle. The same signed URL is served to
+  # iOS and Android (UrlGenerator#android == #ios), but the controller's
+  # response divergence kicks in via the User-Agent: Apple Wallet UAs receive
+  # `.pkpasses` bundles, while Android browsers receive an HTML index that
+  # links to per-pass `.pkpass` downloads. This test pins the entire Android
+  # path including signature verification of the final downloaded pass.
+  def test_android_browser_lifecycle_html_index_then_per_pass_download
+    user = User.find(1)
+    assert_equal 2, user.tickets.count, "fixtures must provide a multi-ticket user for this test"
+
+    # 1) Android-equivalent URL is identical to iOS URL.
+    gen = Passkit::UrlGenerator.new(Passkit::UserTicket, user, :tickets)
+    assert_equal gen.ios, gen.android,
+      "UrlGenerator#android must alias #ios — both platforms share one signed URL"
+
+    # 2) Extract the encrypted payload from the URL and request it with a
+    #    Chrome-on-Android UA. Use the path helper rather than the full URL
+    #    so the integration test stays in-process.
+    payload = gen.android.split("/").last
+    refute_empty payload
+
+    chrome_android_ua = "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 " \
+                       "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+    get passes_api_path(payload), headers: {"User-Agent" => chrome_android_ua}
+
+    # 3) HTML index, not a `.pkpasses` bundle (Android can't open those).
+    assert_response :success
+    assert_equal "text/html", response.headers["Content-Type"].split(";").first
+    assert_match(/Your passes \(2\)/, response.body)
+
+    # 4) No pass rows are persisted yet — generation is deferred until click.
+    assert_equal 0, Passkit::Pass.count
+
+    # 5) Parse the first per-pass href and follow it. URLs are HTML-escaped
+    #    in the index template, so unescape ampersands before re-using.
+    href_match = response.body.match(/href="([^"]+)"/)
+    refute_nil href_match, "expected at least one per-pass <a href>"
+    per_pass_path = href_match[1].gsub("&amp;", "&")
+    per_pass_payload = per_pass_path.split("/").last
+    refute_empty per_pass_payload
+    refute_equal payload, per_pass_payload,
+      "per-pass payload must be re-encrypted with collection_name nil"
+
+    get passes_api_path(per_pass_payload), headers: {"User-Agent" => chrome_android_ua}
+
+    # 6) Single signed `.pkpass` returned with the correct MIME type. The
+    #    same MIME is what triggers PassWallet / Google Wallet on Android.
+    assert_response :success
+    assert_equal "application/vnd.apple.pkpass", response.headers["Content-Type"].split(";").first
+
+    # 7) The `.pkpass` is structurally + cryptographically valid. Signature
+    #    verifies against the test CA, manifest hashes match every entry,
+    #    pass.json passes Apple's schema for eventTicket.
+    pkpass = PkpassHelpers.read_pkpass(response.body)
+    PkpassHelpers::REQUIRED_PKPASS_ENTRIES.each { |req| assert_includes pkpass[:entry_names], req }
+    assert pkpass[:entry_names].any? { |n| n == "icon.png" }
+    assert PkpassHelpers.verify_pkpass_signature!(pkpass)
+    assert PkpassHelpers.assert_valid_pass_json(pkpass[:pass_json], pass_type: :eventTicket)
+
+    # 8) A Pass row was persisted exactly once for this click.
+    assert_equal 1, Passkit::Pass.count
   end
 end

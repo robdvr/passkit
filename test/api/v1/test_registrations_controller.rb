@@ -116,8 +116,10 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
     assert_equal 2, json["serialNumbers"].size
   end
 
-  # TODO(bug:app/controllers/passkit/api/v1/registrations_controller.rb:84): pins eager .all.filter — Phase C will use DB-level filter.
-  def test_show_with_passesUpdatedSince_filter_loads_all_in_memory
+  # passesUpdatedSince filtering happens in SQL via
+  # `passes.where("passkit_passes.updated_at >= ?", since)` —
+  # see app/controllers/passkit/api/v1/registrations_controller.rb#fetch_registered_passes.
+  def test_show_with_passesUpdatedSince_filter_returns_only_recent_passes
     Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
     Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
     Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
@@ -227,6 +229,126 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
     assert_response :created
     assert_equal "TOKEN-B", Passkit::Device.find_by(identifier: identifier).push_token
     assert_equal 1, Passkit::Device.count
+  end
+
+  # ------------------------------------------------------------------
+  # passesUpdatedSince edge cases (production hardening)
+  # ------------------------------------------------------------------
+
+  def test_show_with_passesUpdatedSince_in_future_returns_204
+    # Cutoff strictly after every pass's updated_at → empty result → 204.
+    # Pin so a regression that returned 200 with [] (which iOS would treat
+    # as the device having no passes) is caught immediately.
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+    register_pass(pass)
+
+    get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: 1),
+      params: {passesUpdatedSince: 1.year.from_now.iso8601}
+
+    assert_response :no_content
+  end
+
+  def test_show_with_passesUpdatedSince_filters_at_sql_level_not_in_ruby
+    # Runtime guard: count the SELECT against passkit_passes during the
+    # request and assert it includes a WHERE on updated_at. Using a callback
+    # on Active Support notifications keeps the test framework-agnostic
+    # (no `assert_queries` helper required).
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    [Passkit::Pass.first, Passkit::Pass.last].each { |p| register_pass(p) }
+    Passkit::Pass.first.update_columns(updated_at: 7.days.ago)
+
+    captured_sql = []
+    callback = ->(_name, _start, _finish, _id, payload) {
+      captured_sql << payload[:sql] if payload[:sql].is_a?(String) && payload[:sql].include?("passkit_passes")
+    }
+
+    ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+      get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: 1),
+        params: {passesUpdatedSince: Date.today.iso8601}
+    end
+
+    assert_response :ok
+    assert captured_sql.any? { |s| s.match?(/passkit_passes.*updated_at\s*>=/i) },
+      "expected passesUpdatedSince to push the >= filter into SQL; SQL seen:\n#{captured_sql.inspect}"
+  end
+
+  # ------------------------------------------------------------------
+  # Push token edge cases
+  # ------------------------------------------------------------------
+
+  def test_register_with_explicit_null_push_token_in_json_body_succeeds
+    # Apple sometimes posts {"pushToken": null} during APNs token rotation
+    # gaps. The controller must register the device without overwriting
+    # any prior token to nil and without 5xx-ing.
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+
+    post device_register_path(device_id: "rotating-null", pass_type_id: pass.pass_type_identifier, serial_number: pass.serial_number),
+      params: {pushToken: nil}.to_json,
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}",
+                "Content-Type" => "application/json"}
+
+    assert_response :created
+    assert_nil Passkit::Device.find_by(identifier: "rotating-null").push_token
+  end
+
+  def test_register_does_not_overwrite_existing_push_token_when_subsequent_body_has_blank_token
+    # Existing behavior: `device.update!(push_token: token) if token.present? && device.push_token != token`.
+    # A subsequent registration with blank token must not zero out the
+    # previously-stored APNs token. iOS sometimes posts blank during
+    # transient network errors.
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass1, pass2 = Passkit::Pass.order(:id).to_a
+    identifier = "preserve-token-device"
+
+    post device_register_path(device_id: identifier, pass_type_id: pass1.pass_type_identifier, serial_number: pass1.serial_number),
+      params: {pushToken: "ORIGINAL"}.to_json,
+      headers: {"Authorization" => "ApplePass #{pass1.authentication_token}",
+                "Content-Type" => "application/json"}
+    assert_response :created
+    assert_equal "ORIGINAL", Passkit::Device.find_by(identifier: identifier).push_token
+
+    post device_register_path(device_id: identifier, pass_type_id: pass2.pass_type_identifier, serial_number: pass2.serial_number),
+      params: {pushToken: ""}.to_json,
+      headers: {"Authorization" => "ApplePass #{pass2.authentication_token}",
+                "Content-Type" => "application/json"}
+    assert_response :created
+    assert_equal "ORIGINAL", Passkit::Device.find_by(identifier: identifier).push_token,
+      "blank pushToken must not overwrite a previously-stored value"
+  end
+
+  # ------------------------------------------------------------------
+  # destroy isolation
+  # ------------------------------------------------------------------
+
+  def test_destroy_unregisters_only_target_device_pass_pair
+    # Two distinct devices each registered to the same pass; destroying
+    # one's registration must leave the other intact. Pin against an
+    # accidental `delete_all` that drops by serial alone.
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+
+    post device_register_path(device_id: "dev-keep", pass_type_id: pass.pass_type_identifier, serial_number: pass.serial_number),
+      params: {pushToken: "TKEEP"}.to_json,
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}",
+                "Content-Type" => "application/json"}
+    assert_response :created
+    post device_register_path(device_id: "dev-drop", pass_type_id: pass.pass_type_identifier, serial_number: pass.serial_number),
+      params: {pushToken: "TDROP"}.to_json,
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}",
+                "Content-Type" => "application/json"}
+    assert_response :created
+    assert_equal 2, Passkit::Registration.count
+
+    delete device_unregister_path(device_id: "dev-drop", pass_type_id: pass.pass_type_identifier, serial_number: pass.serial_number),
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}"}
+    assert_response :ok
+
+    surviving = Passkit::Registration.includes(:device).map { |r| r.device.identifier }
+    assert_equal ["dev-keep"], surviving
   end
 
   private

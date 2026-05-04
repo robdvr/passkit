@@ -97,4 +97,39 @@ class TestConfiguration < Minitest::Test
     end
     assert_same Passkit.configuration, yielded
   end
+
+  # ------------------------------------------------------------------
+  # Production env-var hygiene
+  # ------------------------------------------------------------------
+
+  def test_raises_when_web_service_host_is_empty_string
+    # Empty string is truthy in Ruby's `||`, so the existence check passes —
+    # but the start_with?("https://") check then fails. Pin this so a future
+    # refactor that swapped to `present?` still surfaces empty-string env
+    # vars as fatal (and not silently default to nil/empty webservice URLs).
+    with_env("PASSKIT_WEB_SERVICE_HOST" => "") do
+      error = assert_raises(RuntimeError) { Passkit::Configuration.new }
+      assert_includes error.message, "must start with https://"
+    end
+  end
+
+  def test_default_pass_classes_allowlist_is_empty_array
+    config = Passkit::Configuration.new
+    assert_equal [], config.pass_classes,
+      "default empty allowlist preserves backward compatibility"
+  end
+
+  def test_default_pass_generators_allowlist_is_empty_array
+    config = Passkit::Configuration.new
+    assert_equal [], config.pass_generators
+  end
+
+  def test_pass_classes_allowlist_is_assignable
+    # Host apps configure this in `config/initializers/passkit.rb`. Pin that
+    # the attribute writer is present and the value round-trips, so a
+    # future move to `attr_reader` would fail loudly here.
+    config = Passkit::Configuration.new
+    config.pass_classes = ["Passkit::ExampleStoreCard", "MyApp::CouponPass"]
+    assert_equal ["Passkit::ExampleStoreCard", "MyApp::CouponPass"], config.pass_classes
+  end
 end

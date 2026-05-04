@@ -7,6 +7,7 @@ require "json"
 require "digest"
 require "fileutils"
 require "tmpdir"
+require_relative "../../support/pkpass_helpers"
 
 class TestGenerator < ActiveSupport::TestCase
   # ------------------------------------------------------------------
@@ -474,5 +475,235 @@ class TestGenerator < ActiveSupport::TestCase
       "expected CERTIFICATE constant to be removed (now resolved per-call inside sign_manifest)"
     refute Passkit::Generator.const_defined?(:INTERMEDIATE_CERTIFICATE)
     refute Passkit::Generator.const_defined?(:CERTIFICATE_PASSWORD)
+  end
+
+  # ------------------------------------------------------------------
+  # Deep signature verification (production hardening)
+  # ------------------------------------------------------------------
+
+  def test_signature_verifies_via_pkcs7_verify_against_test_ca
+    # Structural parsing is not enough: a future change that broke the math
+    # (wrong digest, swapped detached/attached, signing the wrong bytes) would
+    # still produce a parseable PKCS7 blob. This pins the *cryptographic*
+    # validity against the ephemeral CA.
+    path = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pkpass = PkpassHelpers.read_pkpass(path)
+    assert PkpassHelpers.verify_pkpass_signature!(pkpass)
+  end
+
+  def test_signature_chain_includes_leaf_and_intermediate
+    # Apple's PassKit spec requires the signing leaf + intermediate (WWDR) cert
+    # to both be embedded in the PKCS7 envelope so iOS Wallet can verify the
+    # chain offline. `Generator#sign_manifest` passes [intermediate] as the
+    # `certs` arg to PKCS7.sign; the leaf is added automatically.
+    path = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pkpass = PkpassHelpers.read_pkpass(path)
+    pkcs7 = OpenSSL::PKCS7.new(pkpass[:signature_bytes])
+
+    assert_equal 2, pkcs7.certificates.size,
+      "expected leaf + intermediate, got #{pkcs7.certificates.map { |c| c.subject.to_s }.inspect}"
+
+    subjects = pkcs7.certificates.map { |c| c.subject.to_s }
+    assert subjects.any? { |s| s.include?("Pass Signing") },
+      "expected leaf with subject containing 'Pass Signing', got #{subjects.inspect}"
+    assert subjects.any? { |s| s.include?("Intermediate CA") },
+      "expected intermediate with subject containing 'Intermediate CA', got #{subjects.inspect}"
+  end
+
+  # ------------------------------------------------------------------
+  # Manifest hygiene (Apple spec)
+  # ------------------------------------------------------------------
+
+  def test_manifest_excludes_manifest_json_itself
+    # Per Apple's PassKit spec: manifest.json is the *list of files to verify*
+    # and must not list itself. Code-correct because `generate_json_manifest`
+    # runs before manifest.json is written — this test pins that invariant.
+    path = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    manifest = read_manifest(path)
+    refute_includes manifest.keys, "manifest.json",
+      "manifest.json must not list itself"
+  end
+
+  def test_manifest_excludes_signature
+    # `signature` is what verifies manifest.json's integrity; manifest.json
+    # cannot reference it (chicken/egg). Code-correct because signing happens
+    # after `generate_json_manifest`, but pin it.
+    path = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    manifest = read_manifest(path)
+    refute_includes manifest.keys, "signature",
+      "manifest.json must not list signature"
+  end
+
+  def test_manifest_lists_every_zip_entry_except_manifest_and_signature
+    # Symmetric check: anything in the .pkpass zip that's neither manifest.json
+    # nor signature MUST appear in the manifest (otherwise iOS rejects the pass).
+    path = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    zip_entries = entries(path).reject { |n| %w[manifest.json signature].include?(n) }
+    manifest_keys = read_manifest(path).keys
+    assert_equal zip_entries.sort, manifest_keys.sort,
+      "manifest must list every payload file"
+  end
+
+  # ------------------------------------------------------------------
+  # Localization round-trip (production .lproj scenarios)
+  # ------------------------------------------------------------------
+
+  def test_localization_lproj_subdirectory_round_trips_with_relative_path
+    # Apple's `pass.strings` localization requires the relative path
+    # `<lang>.lproj/pass.strings` to survive both the manifest (so its SHA1 is
+    # checked) and the zip (so iOS can find it). This pins the relative-path
+    # serialization end-to-end and that the SHA1 in the manifest matches what
+    # actually got written.
+    Dir.mktmpdir do |dir|
+      FileUtils.cp_r(Dir["#{example_pass_path}/."], dir)
+      lproj = File.join(dir, "fr.lproj")
+      FileUtils.mkdir_p(lproj)
+      content = "\"hello\" = \"bonjour\";"
+      File.write(File.join(lproj, "pass.strings"), content)
+
+      Passkit::ExampleStoreCard.any_instance.stubs(:pass_path).returns(dir)
+      path = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+
+      manifest = read_manifest(path)
+      assert manifest.key?("fr.lproj/pass.strings"),
+        "expected fr.lproj/pass.strings in manifest, got #{manifest.keys.inspect}"
+
+      zip_bytes = read_entry(path, "fr.lproj/pass.strings")
+      assert_equal content, zip_bytes
+      assert_equal Digest::SHA1.hexdigest(content), manifest["fr.lproj/pass.strings"]
+    end
+  end
+
+  def test_ds_store_files_stripped_from_subdirectories
+    # Pin: the `clean_ds_store_files` glob recurses into all subdirectories,
+    # not just the top level. macOS hosts that mount the pass folder over
+    # SMB/AFS sprinkle these everywhere.
+    Dir.mktmpdir do |dir|
+      FileUtils.cp_r(Dir["#{example_pass_path}/."], dir)
+      File.write(File.join(dir, ".DS_Store"), "junk-top")
+      lproj = File.join(dir, "en.lproj")
+      FileUtils.mkdir_p(lproj)
+      File.write(File.join(lproj, ".DS_Store"), "junk-nested")
+      File.write(File.join(lproj, "pass.strings"), "\"x\" = \"y\";")
+
+      Passkit::ExampleStoreCard.any_instance.stubs(:pass_path).returns(dir)
+      path = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+
+      names = entries(path)
+      refute names.any? { |n| n.end_with?(".DS_Store") },
+        "expected no .DS_Store entries anywhere in zip; got #{names.inspect}"
+      assert_includes names, "en.lproj/pass.strings",
+        "non-junk localization sibling should still be present"
+    end
+  end
+
+  # ------------------------------------------------------------------
+  # add_other_files hook contributions
+  # ------------------------------------------------------------------
+
+  def test_add_other_files_hook_contributions_reach_zip_and_manifest
+    # The `add_other_files` hook lets subclasses drop dynamic content (e.g. a
+    # generated strip.png) into the temp dir before manifest hashing. Pin
+    # that hook output ends up in BOTH the zip and the manifest with a
+    # correct SHA1.
+    path_to_assets = example_pass_path
+    klass = make_pass_subclass do
+      define_method(:pass_path) { path_to_assets }
+      define_method(:add_other_files) do |tmp_path|
+        File.write(File.join(tmp_path, "extra.txt"), "dynamic-content")
+      end
+    end
+
+    path = Passkit::Factory.create_pass(klass)
+
+    assert_includes entries(path), "extra.txt"
+    assert_equal "dynamic-content", read_entry(path, "extra.txt")
+    manifest = read_manifest(path)
+    assert manifest.key?("extra.txt"), "manifest should hash add_other_files contributions"
+    assert_equal Digest::SHA1.hexdigest("dynamic-content"), manifest["extra.txt"]
+  end
+
+  # ------------------------------------------------------------------
+  # `.pkpasses` bundle: every entry independently valid
+  # ------------------------------------------------------------------
+
+  def test_compress_passes_files_produces_independently_valid_pkpass_entries
+    # Apple Wallet UA receives a `.pkpasses` zip; each inner `.pkpass` must
+    # itself be a complete, signed pass (Wallet processes them independently).
+    # This goes beyond the existing structural test by recursively opening
+    # every nested entry and PKCS7-verifying its signature.
+    path1 = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    path2 = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+
+    bundle = Passkit::Generator.compress_passes_files([path1, path2])
+    inner_passes = PkpassHelpers.read_pkpasses_bundle(bundle)
+
+    assert_equal 2, inner_passes.size
+    inner_passes.each do |pkpass|
+      PkpassHelpers::REQUIRED_PKPASS_ENTRIES.each do |required|
+        assert_includes pkpass[:entry_names], required,
+          "every inner .pkpass must contain #{required}; got #{pkpass[:entry_names].inspect}"
+      end
+      assert pkpass[:entry_names].any? { |n| n == "icon.png" },
+        "every inner .pkpass must contain icon.png"
+      assert PkpassHelpers.verify_pkpass_signature!(pkpass),
+        "every inner .pkpass signature must verify"
+    end
+  end
+
+  # ------------------------------------------------------------------
+  # pass.json schema (hand-rolled per-field assertions)
+  # ------------------------------------------------------------------
+
+  def test_pass_json_passes_full_schema_check_for_storeCard
+    path = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    json = read_pass_json(path)
+    assert PkpassHelpers.assert_valid_pass_json(json, pass_type: :storeCard)
+  end
+
+  def test_pass_json_passes_full_schema_check_for_eventTicket
+    user = User.find(1)
+    path = Passkit::Factory.create_pass(Passkit::UserTicket, user)
+    json = read_pass_json(path)
+    assert PkpassHelpers.assert_valid_pass_json(json, pass_type: :eventTicket)
+  end
+
+  def test_pass_json_field_types_are_apple_compliant
+    # Sanity-check exact types beyond presence: integers stay integers,
+    # booleans stay booleans (no JSON.dump flake), URLs are https.
+    path = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    json = read_pass_json(path)
+
+    assert_kind_of Integer, json["formatVersion"]
+    assert_equal 1, json["formatVersion"]
+    %w[sharingProhibited suppressStripShine voided].each do |k|
+      assert_includes [true, false], json[k], "#{k} must be a JSON boolean"
+    end
+    assert_match(PkpassHelpers::RGB_REGEX, json["foregroundColor"])
+    assert_match(PkpassHelpers::RGB_REGEX, json["backgroundColor"])
+    assert_match(PkpassHelpers::RGB_REGEX, json["labelColor"])
+    assert json["webServiceURL"].start_with?("https://")
+    assert_match(/\A[0-9a-f-]{36}\z/, json["serialNumber"])
+  end
+
+  def test_pass_json_for_each_supported_pass_type_emits_correct_block
+    # The `pass[@pass.pass_type] = {...}` line in Generator means whichever
+    # symbol the subclass returns becomes the top-level field-block key.
+    # Pin all 5 supported pass_type values produce the corresponding key.
+    %i[storeCard coupon eventTicket generic boardingPass].each do |type|
+      path_to_assets = example_pass_path
+      klass = make_pass_subclass do
+        define_method(:pass_path) { path_to_assets }
+        define_method(:pass_type) { type }
+        define_method(:boarding_pass) { {} } # avoid merge nil
+      end
+      path = Passkit::Factory.create_pass(klass)
+      json = read_pass_json(path)
+      assert json.key?(type.to_s),
+        "pass_type #{type.inspect} should produce top-level key #{type}; got #{json.keys.inspect}"
+      PkpassHelpers::FIELD_BLOCK_SUBKEYS.each do |sub|
+        assert json[type.to_s].key?(sub), "pass.json #{type}.#{sub} must be present"
+      end
+    end
   end
 end
