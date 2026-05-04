@@ -537,6 +537,51 @@ class TestValidator < ActiveSupport::TestCase
     assert errors.any? { |e| e.include?("wifiAccess[0].password is required") }
   end
 
+  # ---- fetch must not collapse explicit false values ----
+
+  def test_explicit_false_boolean_value_is_visible_to_type_check
+    # Regression: a previous `hash[key] || hash[key.to_s]` implementation
+    # treated `{sharingProhibited: false}` as absent, silently skipping the
+    # boolean type check. A subclass returning `"false"` (string) for the
+    # same key must therefore be REJECTED, not silently accepted.
+    pass = base_pass.merge(sharingProhibited: "false")
+    errors = Passkit::Validator.validate(pass)
+    assert errors.any? { |e| e.include?("sharingProhibited must be boolean") },
+      "validator must catch invalid value even when canonical default is `false`"
+  end
+
+  def test_explicit_false_value_passes_when_actually_boolean
+    pass = base_pass.merge(sharingProhibited: false, voided: false, suppressStripShine: false)
+    assert_equal [], Passkit::Validator.validate(pass)
+  end
+
+  def test_use_automatic_colors_explicit_false_validates_when_boolean
+    pass = base_pass.merge(useAutomaticColors: false)
+    assert_equal [], Passkit::Validator.validate(pass)
+  end
+
+  def test_use_automatic_colors_explicit_string_false_is_rejected
+    pass = base_pass.merge(useAutomaticColors: "false")
+    errors = Passkit::Validator.validate(pass)
+    assert errors.any? { |e| e.include?("useAutomaticColors must be boolean") }
+  end
+
+  def test_nfc_requires_authentication_explicit_false_passes
+    pass = base_pass.merge(nfc: {message: "m", encryptionPublicKey: "k", requiresAuthentication: false})
+    assert_equal [], Passkit::Validator.validate(pass)
+  end
+
+  def test_nfc_requires_authentication_string_false_rejected
+    pass = base_pass.merge(nfc: {message: "m", encryptionPublicKey: "k", requiresAuthentication: "false"})
+    errors = Passkit::Validator.validate(pass)
+    assert errors.any? { |e| e.include?("nfc.requiresAuthentication must be boolean") }
+  end
+
+  def test_event_date_info_unannounced_explicit_false_passes
+    pass = base_pass.merge(semantics: {eventStartDateInfo: {unannounced: false, undetermined: false}})
+    assert_equal [], Passkit::Validator.validate(pass)
+  end
+
   # ---- String-keyed inputs (some callers pass JSON-decoded hashes) ----
 
   def test_validator_handles_string_keys

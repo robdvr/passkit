@@ -89,9 +89,14 @@ module Passkit
 
       private
 
+      # `||` would mask explicit `false` (or `0`) values — `{voided: false}`
+      # would degrade to `nil` and skip the boolean type-check entirely. Use
+      # `key?` semantics so the symbol form takes precedence whenever it's
+      # explicitly present, regardless of value truthiness.
       def fetch(hash, key)
         return nil unless hash.is_a?(Hash)
-        hash[key] || hash[key.to_s]
+        return hash[key] if hash.key?(key)
+        hash[key.to_s]
       end
 
       def validate_required_top_level(pass, errors)

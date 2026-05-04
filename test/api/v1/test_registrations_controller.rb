@@ -156,7 +156,7 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
     register_pass(pass)
     registration = pass.registrations.first
 
-    delete device_unregister_path(device_id: registration.device.id,
+    delete device_unregister_path(device_id: registration.device.identifier,
       pass_type_id: registration.pass.pass_type_identifier,
       serial_number: registration.pass.serial_number),
       params: {}.to_json
@@ -404,7 +404,12 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
   end
 
   def destroy_registration(registration)
-    delete device_unregister_path(device_id: registration.device.id,
+    # The controller's `destroy` action looks up devices by `identifier` (the
+    # opaque deviceLibraryIdentifier Apple sends), not by AR primary key. Old
+    # code passed `device.id` and worked only because the first device in
+    # each test happened to get id=1 and identifier="1" — any test that
+    # bumped the PK first would silently no-op.
+    delete device_unregister_path(device_id: registration.device.identifier,
       pass_type_id: registration.pass.pass_type_identifier,
       serial_number: registration.pass.serial_number),
       params: {}.to_json,
