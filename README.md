@@ -1,8 +1,10 @@
 # <img src="./docs/wallet.png" alt="Goboony" height="50"/> Passkit
 
-Your out-of-the-box solution to start serving Wallet Passes in your Ruby On Rails application.
+`passkit` is a Ruby gem (mountable Rails engine) for generating, signing, and serving `.pkpass` Wallet Passes that work on **both iOS and Android** — no third-party redirect required.
 
-Do you have a QRCode or a Barcode anywhere in your app that you want to distribute as Wallet Pass, compatible for iOS and Android? Look no further!
+The same signed `.pkpass` file is served to both platforms. iOS opens it in Apple Wallet natively; Android users open it with whichever installed app handles `application/vnd.apple.pkpass` (e.g. Google Wallet or a third-party `.pkpass` reader).
+
+Do you have a QRCode or a Barcode anywhere in your app that you want to distribute as a Wallet Pass on iOS and Android? Look no further!
 
 This gem provides everything necessary to distribute Wallet Passes in pkpass format, and gives you all the steps to follow for what we cannot provide.
 
@@ -20,7 +22,7 @@ This gem provides everything necessary to distribute Wallet Passes in pkpass for
 * Full tests coverage: we are working on it!
 * A fancy dashboard: our dashboard is really really simple right now. Pull requests are welcome!
 * Push notifications: this is the most wanted feature I believe. Pull requests are welcome!
-* Google Wallet integration: we use https://walletpasses.io/ on Android to read .pkpass format.
+* Native Google Wallet integration: on Android we serve the raw `.pkpass`; the user's installed reader (Google Wallet, PassWallet, etc.) handles it.
 
 ## Installation
 
@@ -149,8 +151,7 @@ Passkit::UrlGenerator.new(Passkit::UserTicket, User.find(1), :tickets)
 ```
 (this presumes you have `User.find(1).tickets` would return the ticket records)
 
-and then use `.android` or `.ios` to get the URL to serve the Wallet Pass.
-Again, check the example mailer included in the gem to see how to use it.
+and then call `.ios` (or its alias `.android`) to get the URL — both return the same `.pkpass` download URL, since the same file is served to either platform. Check the example mailer included in the gem to see how to use it.
 
 ## Debug issues 
 

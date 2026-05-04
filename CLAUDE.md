@@ -4,7 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this gem is
 
-`passkit` is a mountable Rails engine that generates, signs, and serves Apple Wallet `.pkpass` files (and exposes them to Android via walletpasses.io). It ships ActiveRecord models, the Apple PassKit Web Service API endpoints, a small admin dashboard, and a `Passkit::BasePass` superclass that host apps subclass to define their own passes.
+`passkit` is a Ruby gem (mountable Rails engine) for generating, signing, and serving `.pkpass` Wallet Passes that work on **both iOS and Android** from a single pipeline. The same signed `.pkpass` file is served to either platform — there is no third-party redirect:
+
+- **iOS** — passes are installed natively through Apple Wallet using Apple's PassKit Web Service protocol.
+- **Android** — the raw `.pkpass` is delivered to the device; whichever installed app handles `application/vnd.apple.pkpass` (Google Wallet, PassWallet, or another third-party reader) opens it. `Passkit::UrlGenerator#android` is an alias for `#ios` and returns the same URL.
+
+It ships ActiveRecord models, the Apple PassKit Web Service API endpoints, a small admin dashboard, and a `Passkit::BasePass` superclass that host apps subclass to define their own passes.
 
 ## Common commands
 
@@ -55,7 +60,7 @@ Autoloading uses Zeitwerk-for-gem (`Zeitwerk::Loader.for_gem`) with `lib/generat
 
 The pipeline is the load-bearing part of this codebase. Following one request end-to-end is the fastest way to understand the gem:
 
-1. **URL generation (host app).** `Passkit::UrlGenerator.new(MyPass, owner, :collection?)` builds an iOS download URL pointing at `passes/:payload`. The payload is built by `PayloadGenerator.hash` (`{pass_class, generator_class, generator_id, collection_name, valid_until: 30.days.from_now}`) and AES-128-CBC encrypted by `UrlEncrypt` using `PASSKIT_URL_ENCRYPTION_KEY` (or the host's `secret_key_base[0..15]` as fallback). `.android` wraps the same URL with `https://walletpass.io?u=`.
+1. **URL generation (host app).** `Passkit::UrlGenerator.new(MyPass, owner, :collection?)` builds a `.pkpass` download URL pointing at `passes/:payload`. The payload is built by `PayloadGenerator.hash` (`{pass_class, generator_class, generator_id, collection_name, valid_until: 30.days.from_now}`) and AES-128-CBC encrypted by `UrlEncrypt` using `PASSKIT_URL_ENCRYPTION_KEY` (or the host's `secret_key_base[0..15]` as fallback). `#ios` and `#android` return the same URL — Android opens the raw `.pkpass` with whatever local reader is installed.
 2. **Pass creation (`Api::V1::PassesController#create`).** `decrypt_payload` recovers the hash, rejects expired payloads, and `set_generator` reconstitutes the AR record. If `collection_name` is set, the controller iterates `generator.public_send(collection_name)` and bundles the results as a `.pkpasses` archive; otherwise it produces a single `.pkpass`.
 3. **`Passkit::Factory.create_pass`** persists a `Passkit::Pass` row (which generates a `serial_number` and `authentication_token` in a `before_validation`) and hands it to `Passkit::Generator`.
 4. **`Passkit::Generator#generate_and_sign`** is the core builder. It copies the pass's image folder into `Rails.root/tmp/passkit/<file_name>/`, calls `add_other_files(path)` so the subclass can drop in dynamic images, builds `pass.json` from the subclass's overrides, computes `manifest.json` (SHA1 of every file), signs it with `OpenSSL::PKCS7.sign` using the p12 + Apple WWDR intermediate cert, and `rubyzip`s the directory into a `.pkpass`. Returned path is what `send_file` ships back.

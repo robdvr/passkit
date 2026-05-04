@@ -3,10 +3,9 @@ module Passkit
     module V1
       class PassesController < ActionController::API
         before_action :decrypt_payload, only: :create
+        before_action :set_generator, only: :create
 
         def create
-          set_generator
-
           if @generator && @payload[:collection_name].present?
             collection_name = validated_collection_name(@generator, @payload[:collection_name])
             return head(:not_found) unless collection_name
@@ -58,20 +57,28 @@ module Passkit
           @payload = Passkit::UrlEncrypt.decrypt(params[:payload])
           return head(:not_found) unless allowed_pass_class?(@payload[:pass_class])
           return head(:not_found) unless allowed_generator_class?(@payload[:generator_class])
-
-          valid_until = parse_time(@payload[:valid_until])
-          head(:not_found) if valid_until.nil? || valid_until.past?
+          return head(:not_found) unless valid_until_in_future?(@payload[:valid_until]) # standard:disable Style/RedundantReturn
         rescue OpenSSL::Cipher::CipherError, JSON::ParserError
           head :not_found
         end
 
+        def valid_until_in_future?(value)
+          parsed = parse_time(value)
+          !parsed.nil? && !parsed.past?
+        end
+
+        # Resolves the polymorphic generator referenced by the payload. Uses
+        # `find_by` + explicit `head :not_found` rather than `find` so the 404
+        # is self-contained and does not rely on Rails' show_exceptions
+        # middleware (which behaves differently in API-only apps and tests).
         def set_generator
           @generator = nil
 
           return unless @payload[:generator_class].present? && @payload[:generator_id].present?
 
           generator_class = @payload[:generator_class].constantize
-          @generator = generator_class.find(@payload[:generator_id])
+          @generator = generator_class.find_by(id: @payload[:generator_id])
+          head(:not_found) if @generator.nil?
         end
 
         # Parses both ISO 8601 (encrypted payload's valid_until) and RFC 2616

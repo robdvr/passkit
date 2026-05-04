@@ -44,13 +44,11 @@ class TestUrlGenerator < ActiveSupport::TestCase
     assert_equal "tickets", decrypted[:collection_name]
   end
 
-  def test_android_prepends_walletpass_io
+  def test_android_returns_same_pkpass_url_as_ios
+    # Android receives the .pkpass directly (no walletpasses.io redirect);
+    # the URL must match `.ios` exactly so a single signed payload serves both.
     g = Passkit::UrlGenerator.new(Passkit::ExampleStoreCard)
 
-    assert_equal "https://walletpass.io?u=" + g.ios, g.android
-  end
-
-  def test_android_constant
-    assert_equal "https://walletpass.io?u=", Passkit::UrlGenerator::WALLET_PASS_PREFIX
+    assert_equal g.ios, g.android
   end
 end

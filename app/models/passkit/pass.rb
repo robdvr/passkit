@@ -50,6 +50,13 @@ module Passkit
       self.serial_number ||= SecureRandom.uuid
     end
 
+    # `klass` is captured from the encrypted URL payload at create time and
+    # constantized here so the AR row can act as a façade over the subclass.
+    # The controller's `allowed_pass_class?` guard is the only thing standing
+    # between an attacker-controlled string and `constantize`, so configuring
+    # `Passkit.configuration.pass_classes` with the host app's known pass
+    # subclasses is strongly recommended (an empty allowlist disables the
+    # check for backward compatibility).
     def instance
       @instance ||= klass.constantize.new(generator)
     end

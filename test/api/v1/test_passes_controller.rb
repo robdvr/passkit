@@ -82,7 +82,7 @@ class TestPassesController < ActionDispatch::IntegrationTest
     assert_response :not_found
   end
 
-  def test_create_with_payload_referencing_missing_generator_raises_record_not_found
+  def test_create_with_payload_referencing_missing_generator_returns_404
     payload = Passkit::UrlEncrypt.encrypt(
       valid_until: 30.days.from_now,
       generator_class: "User",
@@ -90,22 +90,11 @@ class TestPassesController < ActionDispatch::IntegrationTest
       pass_class: Passkit::UserTicket.name,
       collection_name: nil
     )
-    # Pin actual behavior: in this Rails 8.1 dummy app, the `show_exceptions = false`
-    # config no longer causes the middleware to re-raise (Rails 7.1+ changed the
-    # semantics so that any non-symbol value falls through to "show all"). The
-    # ActiveRecord::RecordNotFound raised by `generator_class.constantize.find` is
-    # therefore caught by ShowExceptions and rendered as a 404 response.
-    exception = nil
-    begin
-      get passes_api_path(payload)
-    rescue ActiveRecord::RecordNotFound => e
-      exception = e
-    end
-    if exception
-      assert_kind_of ActiveRecord::RecordNotFound, exception
-    else
-      assert_response :not_found
-    end
+    # `set_generator` resolves the polymorphic record with `find_by` + explicit
+    # `head :not_found`, so this 404 is self-contained and does not rely on
+    # Rails' show_exceptions middleware to translate RecordNotFound.
+    get passes_api_path(payload)
+    assert_response :not_found
   end
 
   def test_create_with_malformed_encrypted_payload_returns_404
