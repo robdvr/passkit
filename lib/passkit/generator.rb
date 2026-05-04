@@ -67,8 +67,6 @@ module Passkit
         description: @pass.description,
         foregroundColor: @pass.foreground_color,
         labelColor: @pass.label_color,
-        locations: @pass.locations,
-        logoText: @pass.logo_text,
         organizationName: @pass.organization_name,
         passTypeIdentifier: @pass.pass_type_identifier,
         serialNumber: @pass.serial_number,
@@ -77,6 +75,16 @@ module Passkit
         voided: @pass.voided,
         webServiceURL: @pass.web_service_url
       }
+
+      # Apple's spec marks `locations` and `logoText` as optional. Strict iOS
+      # Wallet versions reject `null` for typed string fields and `[]` for
+      # optional array fields — the install silently fails on iPhone with no
+      # user-visible error. Pass Viewer on macOS is more permissive and
+      # accepts both, so the bug only surfaces on real devices. Omit these
+      # keys when the host pass returns nil/empty so the JSON matches Apple's
+      # optional-field convention.
+      pass[:locations] = @pass.locations if @pass.locations.is_a?(Array) && @pass.locations.any?
+      pass[:logoText] = @pass.logo_text if @pass.logo_text.respond_to?(:to_s) && !@pass.logo_text.to_s.empty?
 
       pass[:maxDistance] = @pass.max_distance if @pass.max_distance
 

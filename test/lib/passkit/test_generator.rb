@@ -107,14 +107,76 @@ class TestGenerator < ActiveSupport::TestCase
   def test_pass_json_has_required_top_level_keys
     path = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
     json = read_pass_json(path)
+    # `locations` and `logoText` are conditional — see the omit/include
+    # tests below. Keep this list to keys Apple genuinely requires plus the
+    # ones the gem always emits (color triples, booleans, web service URL).
     %w[
       formatVersion teamIdentifier authenticationToken backgroundColor
-      description foregroundColor labelColor locations logoText
+      description foregroundColor labelColor
       organizationName passTypeIdentifier serialNumber sharingProhibited
       suppressStripShine voided webServiceURL
     ].each do |key|
       assert json.key?(key), "expected pass.json to include #{key}, keys: #{json.keys.inspect}"
     end
+  end
+
+  # Apple's PassKit spec marks `locations` (optional array) and `logoText`
+  # (optional String) as omit-when-empty. Strict iOS Wallet versions reject
+  # passes containing `"locations": []` or `"logoText": null` — install
+  # silently fails on iPhone with no user-visible error (Pass Viewer on
+  # macOS is more permissive and accepts both). The Generator must emit
+  # these keys only when the host pass returns a non-empty value.
+  def test_pass_json_omits_logoText_when_subclass_returns_nil
+    path_to_assets = example_pass_path
+    klass = make_pass_subclass do
+      define_method(:pass_path) { path_to_assets }
+      define_method(:logo_text) { nil }
+    end
+    path = Passkit::Factory.create_pass(klass)
+    json = read_pass_json(path)
+    refute json.key?("logoText"), "expected pass.json to omit logoText when nil; keys: #{json.keys.inspect}"
+  end
+
+  def test_pass_json_omits_logoText_when_subclass_returns_empty_string
+    path_to_assets = example_pass_path
+    klass = make_pass_subclass do
+      define_method(:pass_path) { path_to_assets }
+      define_method(:logo_text) { "" }
+    end
+    path = Passkit::Factory.create_pass(klass)
+    json = read_pass_json(path)
+    refute json.key?("logoText"), "expected pass.json to omit logoText when blank; keys: #{json.keys.inspect}"
+  end
+
+  def test_pass_json_includes_logoText_when_subclass_returns_string
+    path = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    json = read_pass_json(path)
+    assert json.key?("logoText"), "expected pass.json to include logoText when non-empty"
+    assert_kind_of String, json["logoText"]
+    refute_empty json["logoText"]
+  end
+
+  def test_pass_json_omits_locations_when_empty
+    path_to_assets = example_pass_path
+    klass = make_pass_subclass do
+      define_method(:pass_path) { path_to_assets }
+      define_method(:locations) { [] }
+    end
+    path = Passkit::Factory.create_pass(klass)
+    json = read_pass_json(path)
+    refute json.key?("locations"), "expected pass.json to omit locations when []; keys: #{json.keys.inspect}"
+  end
+
+  def test_pass_json_includes_locations_when_subclass_returns_entries
+    path_to_assets = example_pass_path
+    klass = make_pass_subclass do
+      define_method(:pass_path) { path_to_assets }
+      define_method(:locations) { [ { latitude: 37.7749, longitude: -122.4194 } ] }
+    end
+    path = Passkit::Factory.create_pass(klass)
+    json = read_pass_json(path)
+    assert json.key?("locations"), "expected pass.json to include locations when non-empty"
+    assert_equal 1, json["locations"].size
   end
 
   def test_pass_json_serial_number_matches_pass_record
