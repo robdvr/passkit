@@ -128,12 +128,16 @@ module Passkit
         end
 
         # iOS Wallet identifies its UA as `PassKit/<ver>` (older iOS) or
-        # `Wallet/<ver>` (newer iOS) when fetching a pass URL. Anything else
-        # (a browser on Android, a desktop browser, a third-party reader's
-        # download fetcher) gets the HTML index instead of a `.pkpasses`
-        # bundle they cannot open.
+        # `Wallet/<ver>` (newer iOS) when fetching a pass URL — and the
+        # token is always at the very start of the UA. Anchoring with `\A`
+        # avoids two classes of false positive that `\b…/` lets through:
+        #   - "Google Wallet/2.0"   (space-W boundary still satisfies \b)
+        #   - "My Wallet App/1.0"   (slash after App, but \bWallet\b matches)
+        # If middleware ever prepends a token to Apple's UA the check will
+        # fail and the client gets the HTML index — graceful degradation
+        # is preferable to a `.pkpasses` bundle the client cannot open.
         def apple_wallet_client?
-          request.user_agent.to_s.match?(/\b(PassKit|Wallet)\b/)
+          request.user_agent.to_s.match?(%r{\A(PassKit|Wallet)/})
         end
 
         # Per-pass URLs reuse the same encrypted-payload contract as the
@@ -175,9 +179,21 @@ module Passkit
         end
 
         def bundle_index_link(item)
+          klass_name = item.class.name
+          # DX warning: the security-relevant allowlist check happens at
+          # decrypt time on the next request. If we emit a link whose
+          # generator_class isn't in the allowlist, the click silently 404s.
+          # Surface that here so it's caught in dev rather than production.
+          if !allowed_generator_class?(klass_name)
+            Rails.logger.warn(
+              "[Passkit] bundle_index_link: #{klass_name} is not in " \
+              "Passkit.configuration.pass_generators — link will 404 when clicked."
+            )
+          end
+
           payload = Passkit::UrlEncrypt.encrypt(
             valid_until: Passkit::PayloadGenerator::VALIDITY.from_now,
-            generator_class: item.class.name,
+            generator_class: klass_name,
             generator_id: item.id,
             pass_class: @payload[:pass_class],
             collection_name: nil

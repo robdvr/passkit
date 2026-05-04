@@ -68,6 +68,57 @@ class TestPassesController < ActionDispatch::IntegrationTest
     assert_equal 0, response.body.scan("<a href=").length
   end
 
+  # Apple's UAs are `PassKit/<ver>` and `Wallet/<ver>`. Third-party app names
+  # that contain "Wallet" as a standalone word (e.g. "Google Wallet/2.0",
+  # "My Wallet App/1.0") must NOT be classified as Apple Wallet, otherwise
+  # they get a `.pkpasses` bundle they cannot open.
+  def test_create_collection_does_not_classify_google_wallet_as_apple_wallet
+    payload = Passkit::PayloadGenerator.encrypted(Passkit::UserTicket, User.find(1), :tickets)
+    get passes_api_path(payload), headers: {"User-Agent" => "Google Wallet/2.0"}
+    assert_equal "text/html", response.headers["Content-Type"].split(";").first
+  end
+
+  def test_create_collection_does_not_classify_my_wallet_app_as_apple_wallet
+    payload = Passkit::PayloadGenerator.encrypted(Passkit::UserTicket, User.find(1), :tickets)
+    get passes_api_path(payload), headers: {"User-Agent" => "My Wallet App 1.0"}
+    assert_equal "text/html", response.headers["Content-Type"].split(";").first
+  end
+
+  # DX warning: when `pass_generators` allowlist is non-empty and a per-item
+  # link's generator_class is not in it, the click would silently 404. Logging
+  # at link-generation time surfaces the mismatch in dev.
+  def test_create_collection_html_warns_when_item_class_not_in_pass_generators_allowlist
+    # Allow the outer "User" so the request itself isn't 404'd at decrypt time,
+    # but omit "Ticket" so each per-item link triggers the warning.
+    Passkit.configuration.pass_generators = ["User"]
+    payload = Passkit::PayloadGenerator.encrypted(Passkit::UserTicket, User.find(1), :tickets)
+
+    captured = StringIO.new
+    original_logger = Rails.logger
+    Rails.logger = Logger.new(captured)
+
+    get passes_api_path(payload), headers: {"User-Agent" => "Mozilla/5.0 (Linux; Android 14)"}
+    assert_response :success
+    assert_match(/\[Passkit\] bundle_index_link: Ticket is not in/, captured.string)
+  ensure
+    Rails.logger = original_logger
+    Passkit.configuration.pass_generators = []
+  end
+
+  def test_create_collection_html_does_not_warn_when_pass_generators_allowlist_is_empty
+    payload = Passkit::PayloadGenerator.encrypted(Passkit::UserTicket, User.find(1), :tickets)
+
+    captured = StringIO.new
+    original_logger = Rails.logger
+    Rails.logger = Logger.new(captured)
+
+    get passes_api_path(payload), headers: {"User-Agent" => "Mozilla/5.0 (Linux; Android 14)"}
+    assert_response :success
+    refute_match(/bundle_index_link/, captured.string)
+  ensure
+    Rails.logger = original_logger
+  end
+
   def test_show
     _pkpass = Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
     assert_equal 1, Passkit::Pass.count
