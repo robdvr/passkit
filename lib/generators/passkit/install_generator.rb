@@ -28,6 +28,11 @@ module Passkit
       # then paste:
       #   add_index :passkit_passes, :serial_number, unique: true
       # See lib/generators/templates/add_unique_index_on_passkit_passes_serial_number.rb.tt
+      #
+      # The same goes for the unique indexes on passkit_devices.identifier and
+      # passkit_registrations (passkit_pass_id, passkit_device_id), which the
+      # registration endpoint relies on under concurrent requests. See
+      # lib/generators/templates/add_unique_indexes_on_passkit_devices_and_registrations.rb.tt
     end
   end
 end

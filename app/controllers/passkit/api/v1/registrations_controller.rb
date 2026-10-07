@@ -71,10 +71,29 @@ module Passkit
         end
 
         def register_device
-          device = Passkit::Device.find_or_create_by!(identifier: params[:device_id])
+          device = find_or_create_device
           token = push_token
           device.update!(push_token: token) if token.present? && device.push_token != token
-          @pass.registrations.create!(device: device)
+          # Apple retries and posts in parallel; the unique index on
+          # (passkit_pass_id, passkit_device_id) turns a concurrent duplicate
+          # into a find instead of a second row.
+          @pass.registrations.create_or_find_by!(device: device)
+        end
+
+        # Wallet registers every pass of a multi-pass add at once, so the first
+        # registrations of a new device race each other. The loser of that race
+        # fails either the model's uniqueness validation (RecordInvalid) or the
+        # unique index on passkit_devices.identifier (RecordNotUnique); both
+        # mean the row exists now.
+        def find_or_create_device
+          Passkit::Device.find_or_create_by!(identifier: params[:device_id])
+        rescue ActiveRecord::RecordNotUnique
+          Passkit::Device.find_by!(identifier: params[:device_id])
+        rescue ActiveRecord::RecordInvalid => e
+          # Any other validation failure is a real one, not a lost race.
+          raise unless e.record.errors.of_kind?(:identifier, :taken)
+
+          Passkit::Device.find_by!(identifier: params[:device_id])
         end
 
         def fetch_registered_passes

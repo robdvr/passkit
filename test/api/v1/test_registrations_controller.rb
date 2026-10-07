@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "rails_helper"
+require "mocha/minitest"
 
 class TestRegistrationsController < ActionDispatch::IntegrationTest
   include Passkit::Engine.routes.url_helpers
@@ -49,6 +50,58 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
 
     assert_equal 1, Passkit::Device.count
     assert_equal 2, Passkit::Registration.count
+  end
+
+  # Wallet registers every pass of a multi-pass add in parallel, so two requests
+  # can both miss the device and both try to create it. The loser used to 422
+  # with "Identifier has already been taken".
+  def test_create_when_another_request_created_the_device_first
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+    winner = Passkit::Device.create!(identifier: "1")
+
+    taken = Passkit::Device.new(identifier: "1").tap(&:validate)
+    assert taken.errors.of_kind?(:identifier, :taken)
+
+    [ActiveRecord::RecordInvalid.new(taken), ActiveRecord::RecordNotUnique.new("duplicate key")].each do |lost_race|
+      Passkit::Registration.delete_all
+      Passkit::Device.stubs(:find_or_create_by!).raises(lost_race)
+
+      register_pass(pass)
+
+      assert_response :created
+      assert_equal [winner], pass.devices.reload.to_a
+      assert_equal 1, Passkit::Device.count
+      assert_equal "1234567890", winner.reload.push_token
+    end
+  end
+
+  # Only "taken" is a lost race; any other invalid device stays an error.
+  def test_create_does_not_swallow_other_device_validation_failures
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+    Passkit::Device.create!(identifier: "1")
+    invalid = Passkit::Device.new.tap { |device| device.errors.add(:push_token, :blank) }
+    Passkit::Device.stubs(:find_or_create_by!).raises(ActiveRecord::RecordInvalid.new(invalid))
+
+    register_pass(pass)
+
+    assert_equal 422, response.status
+    assert_equal 0, Passkit::Registration.count
+  end
+
+  def test_create_when_another_request_registered_the_pass_first
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+    device = Passkit::Device.create!(identifier: "1", push_token: "1234567890")
+    Passkit::Registration.create!(pass: pass, device: device)
+    # The other request's row is not visible to this one's first lookup.
+    Passkit::Pass.any_instance.stubs(:devices).returns(Passkit::Device.none)
+
+    register_pass(pass)
+
+    assert_response :created
+    assert_equal 1, Passkit::Registration.count
   end
 
   def test_create_without_authorization_header_returns_401
