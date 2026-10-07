@@ -17,12 +17,14 @@ class CreatePasskitTables < ActiveRecord::Migration[<%= ActiveRecord::Migration.
       t.string :identifier
       t.string :push_token
       t.timestamps null: false
+      t.index :identifier, unique: true
     end
 
     create_table :passkit_registrations do |t|
       t.belongs_to :passkit_pass, index: true
       t.belongs_to :passkit_device, index: true
       t.timestamps null: false
+      t.index [:passkit_pass_id, :passkit_device_id], unique: true, name: 'index_passkit_registrations_on_pass_and_device'
     end
 
     create_table :passkit_logs do |t|

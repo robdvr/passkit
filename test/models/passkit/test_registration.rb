@@ -25,6 +25,15 @@ class TestPasskitRegistration < ActiveSupport::TestCase
     assert_equal device, registration.device
   end
 
+  def test_one_registration_per_pass_and_device_in_the_database
+    pass = Passkit::Pass.create!(klass: "Passkit::ExampleStoreCard")
+    device = Passkit::Device.create!(identifier: "reg-dev-2")
+    Passkit::Registration.create!(pass: pass, device: device)
+    assert_raises(ActiveRecord::RecordNotUnique) do
+      Passkit::Registration.create!(pass: pass, device: device)
+    end
+  end
+
   # Rails 5+ makes belongs_to required by default (unless `optional: true`).
   def test_creating_without_pass_or_device_invalid_in_rails_8_belongs_to_required_by_default
     registration = Passkit::Registration.new

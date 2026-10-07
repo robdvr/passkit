@@ -1,0 +1,10 @@
+class AddUniqueIndexesOnPasskitDevicesAndRegistrations < ActiveRecord::Migration[<%= ActiveRecord::Migration.current_version %>]
+  # Remove duplicate rows first: both indexes fail to build on a table that
+  # already holds two devices with one identifier, or two registrations of one
+  # pass on one device.
+  def change
+    add_index :passkit_devices, :identifier, unique: true
+    add_index :passkit_registrations, [:passkit_pass_id, :passkit_device_id], unique: true,
+      name: "index_passkit_registrations_on_pass_and_device"
+  end
+end

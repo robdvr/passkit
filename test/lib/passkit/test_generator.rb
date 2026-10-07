@@ -171,7 +171,7 @@ class TestGenerator < ActiveSupport::TestCase
     path_to_assets = example_pass_path
     klass = make_pass_subclass do
       define_method(:pass_path) { path_to_assets }
-      define_method(:locations) { [ { latitude: 37.7749, longitude: -122.4194 } ] }
+      define_method(:locations) { [{latitude: 37.7749, longitude: -122.4194}] }
     end
     path = Passkit::Factory.create_pass(klass)
     json = read_pass_json(path)

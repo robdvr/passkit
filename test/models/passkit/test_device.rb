@@ -10,6 +10,13 @@ class TestPasskitDevice < ActiveSupport::TestCase
     assert_includes duplicate.errors.attribute_names, :identifier
   end
 
+  def test_identifier_is_unique_in_the_database
+    Passkit::Device.create!(identifier: "abc")
+    assert_raises(ActiveRecord::RecordNotUnique) do
+      Passkit::Device.new(identifier: "abc").save!(validate: false)
+    end
+  end
+
   def test_push_token_persists
     d = Passkit::Device.create!(identifier: "dev-1", push_token: "push-token-xyz")
     assert_equal "push-token-xyz", Passkit::Device.find(d.id).push_token

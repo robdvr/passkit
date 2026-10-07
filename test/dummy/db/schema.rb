@@ -10,12 +10,13 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_02_120000) do
+ActiveRecord::Schema[8.1].define(version: 2026_10_07_120000) do
   create_table "passkit_devices", force: :cascade do |t|
     t.string "identifier"
     t.string "push_token"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.index ["identifier"], name: "index_passkit_devices_on_identifier", unique: true
   end
 
   create_table "passkit_logs", force: :cascade do |t|
@@ -44,6 +45,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_02_120000) do
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.index ["passkit_device_id"], name: "index_passkit_registrations_on_passkit_device_id"
+    t.index ["passkit_pass_id", "passkit_device_id"], name: "index_passkit_registrations_on_pass_and_device", unique: true
     t.index ["passkit_pass_id"], name: "index_passkit_registrations_on_passkit_pass_id"
   end
 
