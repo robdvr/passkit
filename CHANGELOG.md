@@ -9,7 +9,28 @@
 
 ### Bug fixes
 - **`Passkit::Generator.compress_passes_files`** — a `.pkpasses` bundle for an empty collection answered 500 when no pass had been generated since boot, because `tmp/passkit` did not exist yet. The folder is now created there too.
-- **`Api::V1::RegistrationsController#register_device`** — the first registrations of a new device raced each other. Wallet registers every pass of a multi-pass add in parallel, `passkit_devices.identifier` had no unique index, and the model validation alone let two rows through; every later registration from that device then failed with `Identifier has already been taken` (422). The install migration now creates unique indexes on `passkit_devices.identifier` and `passkit_registrations (passkit_pass_id, passkit_device_id)`, and the controller treats the loser of either race as a find. **Existing installs need the indexes too** — `lib/generators/templates/add_unique_indexes_on_passkit_devices_and_registrations.rb.tt` — after removing any duplicate rows.
+- **`Api::V1::RegistrationsController#register_device`** — the first registrations of a new device raced each other. Wallet registers every pass of a multi-pass add in parallel, `passkit_devices.identifier` had no unique index, and the model validation alone let two rows through; every later registration from that device then failed with `Identifier has already been taken` (422). The install migration now creates unique indexes on `passkit_devices.identifier` and `passkit_registrations (passkit_pass_id, passkit_device_id)`, and the controller treats the loser of either race as a find. **Existing installs need the indexes too** — `lib/generators/templates/add_unique_indexes_on_passkit_devices_and_registrations.rb.tt` — after removing any duplicate rows. An install that already hit the bug holds them, and the index build fails on exactly those. On PostgreSQL, in one transaction ahead of the two `add_index` calls:
+
+  ```sql
+  -- 1. point every registration of a duplicate device at the row that stays
+  UPDATE passkit_registrations r SET passkit_device_id = k.keeper_id
+  FROM (SELECT id, first_value(id) OVER (PARTITION BY identifier
+                 ORDER BY (push_token IS NULL), updated_at DESC, id) AS keeper_id
+        FROM passkit_devices WHERE identifier IS NOT NULL) k
+  WHERE r.passkit_device_id = k.id AND k.id <> k.keeper_id;
+
+  -- 2. drop the registrations that step 1 made identical
+  DELETE FROM passkit_registrations WHERE id IN (
+    SELECT id FROM (SELECT id, row_number() OVER (
+                      PARTITION BY passkit_pass_id, passkit_device_id ORDER BY id) AS n
+                    FROM passkit_registrations) ranked WHERE n > 1);
+
+  -- 3. drop every device but the one step 1 kept (same ordering)
+  DELETE FROM passkit_devices WHERE id IN (
+    SELECT id FROM (SELECT id, row_number() OVER (PARTITION BY identifier
+                      ORDER BY (push_token IS NULL), updated_at DESC, id) AS n
+                    FROM passkit_devices WHERE identifier IS NOT NULL) ranked WHERE n > 1);
+  ```
 - **`Passkit::Generator#generate_json_pass`** — `locations` and `logoText` were emitted unconditionally as `[]` / `null` when the host pass returned an empty array or nil. Apple's PassKit spec marks both as optional (omit-when-empty); strict iOS Wallet versions reject passes containing `"locations": []` or `"logoText": null` and the install silently fails on iPhone with no user-visible error. Pass Viewer on macOS is more permissive and accepts both, so the bug only surfaces on real devices. Now omitted from the JSON when empty.
 - **`Api::V1::RegistrationsController#fetch_registered_passes`** — `passesUpdatedSince` was parsed with `Date.parse`, which silently rounded the timestamp to midnight and expanded the update window by up to 24h (passes Apple should not have re-fetched were returned as updatable). Now uses `Time.zone.parse`, which preserves H:M:S. Transparent to host apps.
 - **`Api::V1::RegistrationsController#updatable_passes`** — `lastUpdated` was a `Time` instance, whose JSON serialization is Ruby-specific and does not round-trip cleanly through `Time.zone.parse` on the next request. Now an ISO 8601 String.

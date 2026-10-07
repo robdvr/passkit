@@ -60,7 +60,10 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
     pass = Passkit::Pass.first
     winner = Passkit::Device.create!(identifier: "1")
 
-    [ActiveRecord::RecordInvalid.new(Passkit::Device.new), ActiveRecord::RecordNotUnique.new("duplicate key")].each do |lost_race|
+    taken = Passkit::Device.new(identifier: "1").tap(&:validate)
+    assert taken.errors.of_kind?(:identifier, :taken)
+
+    [ActiveRecord::RecordInvalid.new(taken), ActiveRecord::RecordNotUnique.new("duplicate key")].each do |lost_race|
       Passkit::Registration.delete_all
       Passkit::Device.stubs(:find_or_create_by!).raises(lost_race)
 
@@ -71,6 +74,20 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
       assert_equal 1, Passkit::Device.count
       assert_equal "1234567890", winner.reload.push_token
     end
+  end
+
+  # Only "taken" is a lost race; any other invalid device stays an error.
+  def test_create_does_not_swallow_other_device_validation_failures
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+    Passkit::Device.create!(identifier: "1")
+    invalid = Passkit::Device.new.tap { |device| device.errors.add(:push_token, :blank) }
+    Passkit::Device.stubs(:find_or_create_by!).raises(ActiveRecord::RecordInvalid.new(invalid))
+
+    register_pass(pass)
+
+    assert_equal 422, response.status
+    assert_equal 0, Passkit::Registration.count
   end
 
   def test_create_when_another_request_registered_the_pass_first

@@ -87,7 +87,12 @@ module Passkit
         # mean the row exists now.
         def find_or_create_device
           Passkit::Device.find_or_create_by!(identifier: params[:device_id])
-        rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotUnique
+        rescue ActiveRecord::RecordNotUnique
+          Passkit::Device.find_by!(identifier: params[:device_id])
+        rescue ActiveRecord::RecordInvalid => e
+          # Any other validation failure is a real one, not a lost race.
+          raise unless e.record.errors.of_kind?(:identifier, :taken)
+
           Passkit::Device.find_by!(identifier: params[:device_id])
         end
 
