@@ -25,6 +25,8 @@ module Passkit
     end
 
     def self.compress_passes_files(files)
+      # An empty collection reaches here before any pass created the folder.
+      FileUtils.mkdir_p(TMP_FOLDER)
       zip_path = TMP_FOLDER.join("#{SecureRandom.uuid}.pkpasses")
       File.open(zip_path, "wb") {} # ensure binary mode
 
