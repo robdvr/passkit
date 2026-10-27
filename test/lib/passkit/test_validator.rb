@@ -346,9 +346,11 @@ class TestValidator < ActiveSupport::TestCase
 
   # ---- preferredStyleSchemes (iOS 18+) ----
 
-  def test_preferred_style_schemes_accepts_known_value
-    pass = base_pass.merge(preferredStyleSchemes: ["posterEventTicket"])
-    assert_equal [], Passkit::Validator.validate(pass)
+  def test_preferred_style_schemes_accepts_every_apple_scheme
+    %w[posterEventTicket eventTicket semanticBoardingPass boardingPass].each do |scheme|
+      pass = base_pass.merge(preferredStyleSchemes: [scheme])
+      assert_equal [], Passkit::Validator.validate(pass), scheme
+    end
   end
 
   def test_preferred_style_schemes_rejects_unknown_value
@@ -365,17 +367,27 @@ class TestValidator < ActiveSupport::TestCase
 
   # ---- additionalInfoFields ----
 
-  def test_additional_info_fields_validated_as_pass_field_content
-    pass = base_pass.merge(additionalInfoFields: [{label: "no key or value"}])
+  # Apple's PassFields holds additionalInfoFields beside backFields. At the
+  # top level of pass.json Wallet ignores it, so the validator refuses it.
+  def test_additional_info_fields_at_top_level_is_misplaced
+    pass = base_pass.merge(additionalInfoFields: [{key: "doors", value: "7pm"}])
     errors = Passkit::Validator.validate(pass)
-    assert errors.any? { |e| e.include?("additionalInfoFields[0].key is required") }
-    assert errors.any? { |e| e.include?("additionalInfoFields[0].value is required") }
+    assert errors.any? { |e| e.include?("additionalInfoFields belongs inside the pass style block") }
+  end
+
+  def test_additional_info_fields_validated_as_pass_field_content
+    pass = base_pass
+    pass[:storeCard][:additionalInfoFields] = [{label: "no key or value"}]
+    errors = Passkit::Validator.validate(pass)
+    assert errors.any? { |e| e.include?("storeCard.additionalInfoFields[0].key is required") }
+    assert errors.any? { |e| e.include?("storeCard.additionalInfoFields[0].value is required") }
   end
 
   def test_additional_info_fields_must_be_array
-    pass = base_pass.merge(additionalInfoFields: {key: "x", value: "y"})
+    pass = base_pass
+    pass[:storeCard][:additionalInfoFields] = {key: "x", value: "y"}
     errors = Passkit::Validator.validate(pass)
-    assert errors.any? { |e| e.include?("additionalInfoFields must be an Array") }
+    assert errors.any? { |e| e.include?("storeCard.additionalInfoFields must be an Array") }
   end
 
   # ---- relevantDates (iOS 18+) ----
@@ -411,10 +423,22 @@ class TestValidator < ActiveSupport::TestCase
     assert errors.any? { |e| e.include?("endDate must be >= startDate") }
   end
 
-  def test_relevant_dates_requires_start_date
+  def test_relevant_dates_requires_date_or_start_date
     pass = base_pass.merge(relevantDates: [{endDate: "2030-01-01T12:00:00+00:00"}])
     errors = Passkit::Validator.validate(pass)
-    assert errors.any? { |e| e.include?("startDate is required") }
+    assert errors.any? { |e| e.include?("relevantDates[0] needs date or startDate") }
+  end
+
+  # Apple's RelevantDate takes a single `date` as well as a start/end window.
+  def test_relevant_dates_accepts_single_date_key
+    pass = base_pass.merge(relevantDates: [{date: "2030-01-01T12:00:00+00:00"}])
+    assert_equal [], Passkit::Validator.validate(pass)
+  end
+
+  def test_relevant_dates_rejects_invalid_date_key
+    pass = base_pass.merge(relevantDates: [{date: "soon"}])
+    errors = Passkit::Validator.validate(pass)
+    assert errors.any? { |e| e.include?("relevantDates[0].date is not valid ISO 8601") }
   end
 
   def test_relevant_dates_rejects_invalid_iso
@@ -461,10 +485,11 @@ class TestValidator < ActiveSupport::TestCase
     assert errors.any? { |e| e.include?("semantics.silenceRequested must be boolean") }
   end
 
-  def test_semantics_duration_must_be_numeric
+  # Apple's model types duration as Int (seconds).
+  def test_semantics_duration_must_be_integer
     pass = base_pass.merge(semantics: {duration: "two hours"})
     errors = Passkit::Validator.validate(pass)
-    assert errors.any? { |e| e.include?("semantics.duration must be Numeric") }
+    assert errors.any? { |e| e.include?("semantics.duration must be Integer") }
   end
 
   def test_semantics_performer_names_must_be_string_array
@@ -482,9 +507,12 @@ class TestValidator < ActiveSupport::TestCase
     assert errors.any? { |e| e.include?("semantics.venueLocation.longitude is required") }
   end
 
-  def test_semantics_venue_entrance_lat_lon_optional
-    pass = base_pass.merge(semantics: {venueEntrance: {latitude: 40.0, longitude: -74.0}})
-    assert_equal [], Passkit::Validator.validate(pass)
+  # Apple's semantics model types venueEntrance as a String (the entrance's
+  # name), not a location.
+  def test_semantics_venue_entrance_is_a_string
+    assert_equal [], Passkit::Validator.validate(base_pass.merge(semantics: {venueEntrance: "Gate A"}))
+    errors = Passkit::Validator.validate(base_pass.merge(semantics: {venueEntrance: {latitude: 40.0, longitude: -74.0}}))
+    assert errors.any? { |e| e.include?("semantics.venueEntrance must be String") }
   end
 
   def test_semantics_total_price_requires_amount_and_currency
@@ -627,5 +655,189 @@ class TestValidator < ActiveSupport::TestCase
     assert errors.any? { |e| e.include?("backgroundColor") }
     assert errors.any? { |e| e.include?("preferredStyleSchemes") }
     assert errors.any? { |e| e.include?("semantics.eventType") }
+  end
+
+  # ---- Apple pass-builder parity (Validation/Validators, WWDC26) ----
+
+  def event_ticket_pass(**overrides)
+    pass = base_pass
+    pass.delete(:storeCard)
+    pass[:eventTicket] = {headerFields: [], primaryFields: [], secondaryFields: [], auxiliaryFields: [], backFields: []}
+    pass.merge(overrides)
+  end
+
+  POSTER_SEMANTICS = {eventName: "Show", venueName: "Hall"}.freeze
+  POSTER_NFC = {message: "m", encryptionPublicKey: "k", requiresAuthentication: false}.freeze
+
+  # Apple's EventTicketValidator errors, applied when an eventTicket lists the
+  # posterEventTicket scheme. Each row drops one requirement.
+  [
+    [{semantics: POSTER_SEMANTICS}, ["posterEventTicket needs nfc"]],
+    [{semantics: POSTER_SEMANTICS, nfc: POSTER_NFC.except(:requiresAuthentication)}, ["posterEventTicket needs nfc.requiresAuthentication"]],
+    [{semantics: POSTER_SEMANTICS.except(:eventName), nfc: POSTER_NFC}, ["posterEventTicket needs semantics.eventName"]],
+    [{semantics: POSTER_SEMANTICS.except(:venueName), nfc: POSTER_NFC}, ["posterEventTicket needs semantics.venueName"]],
+    [{semantics: POSTER_SEMANTICS.merge(eventType: "PKEventTypeSports"), nfc: POSTER_NFC},
+      ["needs semantics.awayTeamAbbreviation", "needs semantics.homeTeamAbbreviation"]],
+    [{semantics: POSTER_SEMANTICS.merge(eventType: "PKEventTypeLivePerformance"), nfc: POSTER_NFC}, ["needs semantics.performerNames"]],
+    [{semantics: POSTER_SEMANTICS, nfc: POSTER_NFC}, []]
+  ].each_with_index do |(overrides, expected), i|
+    define_method(:"test_poster_event_ticket_requirements_#{i}") do
+      pass = event_ticket_pass(preferredStyleSchemes: %w[posterEventTicket eventTicket], **overrides)
+      errors = Passkit::Validator.validate(pass, files: %w[icon.png artwork.png])
+      expected.each { |msg| assert errors.any? { |e| e.include?(msg) }, "expected #{msg.inspect} in #{errors.inspect}" }
+      assert_empty errors if expected.empty?
+    end
+  end
+
+  def test_poster_event_ticket_needs_artwork_or_background_image
+    pass = event_ticket_pass(preferredStyleSchemes: ["posterEventTicket"], semantics: POSTER_SEMANTICS, nfc: POSTER_NFC)
+    errors = Passkit::Validator.validate(pass, files: %w[icon.png logo.png])
+    assert errors.any? { |e| e.include?("posterEventTicket needs an artwork or background image") }
+    assert_empty Passkit::Validator.validate(pass, files: %w[icon.png background@2x.png])
+  end
+
+  # A legacy event ticket has none of the poster requirements.
+  def test_event_ticket_without_poster_scheme_skips_poster_rules
+    assert_empty Passkit::Validator.validate(event_ticket_pass, files: %w[icon.png])
+  end
+
+  def test_icon_is_required_when_files_are_given
+    errors = Passkit::Validator.validate(base_pass, files: %w[logo.png icon@2x.png])
+    assert errors.any? { |e| e.include?("icon.png is required") }
+  end
+
+  def test_files_are_not_checked_when_not_given
+    assert_empty Passkit::Validator.validate(base_pass)
+  end
+
+  def test_barcodes_accept_every_ios_27_format
+    %w[PKBarcodeFormatCode39 PKBarcodeFormatCodabar PKBarcodeFormatEAN13 PKBarcodeFormatI2of5].each do |format|
+      pass = base_pass.merge(barcodes: [{format: format, message: "123456", messageEncoding: "iso-8859-1"}])
+      assert_empty Passkit::Validator.validate(pass), format
+    end
+  end
+
+  # Apple's semantics model: flightNumber Int, boardingSequenceNumber String.
+  [
+    [{flightNumber: 815}, nil],
+    [{flightNumber: "815"}, "semantics.flightNumber must be Integer"],
+    [{boardingSequenceNumber: "12"}, nil],
+    [{boardingSequenceNumber: 12}, "semantics.boardingSequenceNumber must be String"],
+    [{venueEntranceGate: "B"}, nil],
+    [{venueEntranceGate: 2}, "semantics.venueEntranceGate must be String"],
+    [{departureTerminal: 4}, "semantics.departureTerminal must be String"]
+  ].each_with_index do |(semantics, error), i|
+    define_method(:"test_semantics_types_match_apple_#{i}") do
+      errors = Passkit::Validator.validate(base_pass.merge(semantics: semantics))
+      if error
+        assert errors.any? { |e| e.include?(error) }, "expected #{error.inspect} in #{errors.inspect}"
+      else
+        assert_empty errors
+      end
+    end
+  end
+
+  # Wallet refuses a pass whose fields repeat a key.
+  def test_field_keys_must_be_unique_within_a_style_block
+    pass = base_pass
+    pass[:storeCard][:primaryFields] = [{key: "name", value: "A"}]
+    pass[:storeCard][:backFields] = [{key: "name", value: "B"}]
+    errors = Passkit::Validator.validate(pass)
+    assert errors.any? { |e| e.include?("duplicate field key \"name\"") }
+  end
+
+  def test_change_message_must_contain_placeholder
+    pass = base_pass
+    pass[:storeCard][:primaryFields] = [{key: "a", value: "x", changeMessage: "Changed"}]
+    assert Passkit::Validator.validate(pass).any? { |e| e.include?("changeMessage must contain %@") }
+    pass[:storeCard][:primaryFields] = [{key: "a", value: "x", changeMessage: "Now %@"}]
+    assert_empty Passkit::Validator.validate(pass)
+  end
+
+  def test_date_formatted_field_needs_an_iso_8601_value
+    pass = base_pass
+    pass[:storeCard][:secondaryFields] = [{key: "when", value: "Tonight", dateStyle: "PKDateStyleShort"}]
+    assert Passkit::Validator.validate(pass).any? { |e| e.include?("storeCard.secondaryFields[0].value must be ISO 8601") }
+    pass[:storeCard][:secondaryFields] = [{key: "when", value: "2030-01-01T19:00:00-05:00", timeStyle: "PKDateStyleShort", ignoresTimeZone: true}]
+    assert_empty Passkit::Validator.validate(pass)
+  end
+
+  def test_field_boolean_flags_and_currency_code
+    pass = base_pass
+    pass[:storeCard][:primaryFields] = [{key: "a", value: 5, ignoresTimeZone: "yes", isRelative: 1, currencyCode: "dollars"}]
+    errors = Passkit::Validator.validate(pass)
+    assert errors.any? { |e| e.include?("ignoresTimeZone must be boolean") }
+    assert errors.any? { |e| e.include?("isRelative must be boolean") }
+    assert errors.any? { |e| e.include?("currencyCode must be a 3-letter") }
+  end
+
+  # ---- featuredActions (iOS 27) ----
+
+  def test_featured_actions_accept_apple_types
+    actions = [
+      {identifier: "agenda", type: "viewSchedule", url: "https://example.com/agenda"},
+      {identifier: "map", type: "place", url: "https://maps.apple.com/?q=Hall"}
+    ]
+    assert_empty Passkit::Validator.validate(base_pass.merge(featuredActions: actions))
+  end
+
+  [
+    [[{identifier: "a", type: "bogus", url: "https://x.test"}], "featuredActions[0].type must be one of"],
+    [[{type: "call", url: "tel:+15555550100"}], "featuredActions[0].identifier is required"],
+    [[{identifier: "a", type: "call", url: "not a url"}], "featuredActions[0].url must be an absolute URL"],
+    [[{identifier: "a", type: "call"}, {identifier: "a", type: "place"}], "featuredActions identifiers must be unique"],
+    [Array.new(3) { |n| {identifier: "a#{n}", type: "shop", url: "https://x.test"} }, "featuredActions holds at most 2"],
+    [{identifier: "a", type: "shop"}, "featuredActions must be an Array"]
+  ].each_with_index do |(actions, error), i|
+    define_method(:"test_featured_actions_rejects_#{i}") do
+      errors = Passkit::Validator.validate(base_pass.merge(featuredActions: actions))
+      assert errors.any? { |e| e.include?(error) }, "expected #{error.inspect} in #{errors.inspect}"
+    end
+  end
+
+  # ---- posterGeneric (iOS 27) ----
+
+  def test_poster_generic_is_validated_and_needs_a_legacy_style
+    poster = {headerFields: [{key: "h", value: "x"}], footerFields: [{label: "no key"}]}
+    errors = Passkit::Validator.validate(base_pass.merge(posterGeneric: poster))
+    assert errors.any? { |e| e.include?("posterGeneric.footerFields[0].key is required") }
+
+    alone = base_pass.merge(posterGeneric: {headerFields: []})
+    alone.delete(:storeCard)
+    errors = Passkit::Validator.validate(alone)
+    assert errors.any? { |e| e.include?("pass must include one of") }, "posterGeneric alone leaves iOS 26 with nothing to show"
+  end
+
+  # posterGeneric repeats the legacy block's fields by design, so keys only
+  # have to be unique within each block.
+  def test_poster_generic_may_reuse_the_legacy_keys
+    pass = base_pass
+    pass[:storeCard][:primaryFields] = [{key: "name", value: "Ana"}]
+    pass[:posterGeneric] = {primaryFields: [{key: "name", value: "Ana"}]}
+    assert_empty Passkit::Validator.validate(pass)
+  end
+
+  # ---- limits and other top-level keys ----
+
+  def test_locations_and_beacons_hold_at_most_ten
+    locations = Array.new(11) { {latitude: 1.0, longitude: 2.0} }
+    beacons = Array.new(11) { {proximityUUID: "E2C56DB5-DFFB-48D2-B060-D0F5A71096E0"} }
+    errors = Passkit::Validator.validate(base_pass.merge(locations: locations, beacons: beacons))
+    assert errors.any? { |e| e.include?("locations holds at most 10") }
+    assert errors.any? { |e| e.include?("beacons holds at most 10") }
+  end
+
+  def test_max_distance_and_suppress_header_darkening_types
+    errors = Passkit::Validator.validate(base_pass.merge(maxDistance: "far", suppressHeaderDarkening: "no"))
+    assert errors.any? { |e| e.include?("maxDistance must be a non-negative number") }
+    assert errors.any? { |e| e.include?("suppressHeaderDarkening must be boolean") }
+  end
+
+  def test_upcoming_pass_information_entries
+    good = [{identifier: "s1", name: "Keynote", type: "event", isActive: true}]
+    assert_empty Passkit::Validator.validate(base_pass.merge(upcomingPassInformation: good))
+    errors = Passkit::Validator.validate(base_pass.merge(upcomingPassInformation: [{name: "x", isActive: "y"}]))
+    assert errors.any? { |e| e.include?("upcomingPassInformation[0].identifier is required") }
+    assert errors.any? { |e| e.include?("upcomingPassInformation[0].isActive must be boolean") }
   end
 end

@@ -28,13 +28,15 @@ module Passkit
         # @return If there are no matching passes, returns HTTP status 204.
         # @return Otherwise, returns the appropriate standard HTTP status
         def show
+          # Apple's spec: no matching passes is 204, a device we do not know
+          # included (it unregistered its last pass, or never registered).
           if @device.nil?
-            render json: {}, status: :not_found
+            render json: {}, status: :no_content
             return
           end
 
           passes = fetch_registered_passes
-          if passes.none?
+          unless passes.exists?
             render json: {}, status: :no_content
             return
           end
@@ -47,7 +49,11 @@ module Passkit
         # @return Otherwise, returns the appropriate standard HTTP status.
         def destroy
           device = Passkit::Device.find_by(identifier: params[:device_id])
-          @pass.registrations.where(device: device).delete_all if device
+          if device
+            @pass.registrations.where(device: device).delete_all
+            # A device with no pass left has nothing to be told about.
+            device.destroy unless device.registrations.exists?
+          end
           render json: {}, status: :ok
         end
 
@@ -60,8 +66,10 @@ module Passkit
             return
           end
 
-          @pass = Pass.find_by(serial_number: params[:serial_number], authentication_token: authentication_token)
-          unless @pass
+          @pass = Pass.find_by(serial_number: params[:serial_number])
+          unless @pass&.authentication_token.present? &&
+              ActiveSupport::SecurityUtils.secure_compare(@pass.authentication_token, authentication_token)
+            @pass = nil
             render json: {}, status: :unauthorized
           end
         end
@@ -110,13 +118,16 @@ module Passkit
           end
           return passes if since.nil?
 
-          passes.where("passkit_passes.updated_at >= ?", since)
+          passes.where("passkit_passes.updated_at > ?", since)
         end
 
+        # `lastUpdated` comes back as the next passesUpdatedSince. It is the
+        # newest updated_at among the passes listed, to the microsecond, not
+        # the clock: a pass written between this query and "now" stays newer
+        # than the tag and is listed on the next poll.
         def updatable_passes(passes)
-          # Round-trip back through `Time.zone.parse` next call requires an
-          # ISO 8601 string, not a Time instance.
-          {lastUpdated: Time.zone.now.iso8601, serialNumbers: passes.pluck(:serial_number)}
+          rows = passes.pluck(:serial_number, :updated_at)
+          {lastUpdated: rows.map(&:last).max.utc.iso8601(6), serialNumbers: rows.map(&:first)}
         end
 
         def push_token

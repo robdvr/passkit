@@ -786,17 +786,110 @@ class TestGenerator < ActiveSupport::TestCase
     refute read_pass_json(path).key?("preferredStyleSchemes")
   end
 
-  def test_pass_json_includes_additionalInfoFields_when_non_empty
+  # Apple defines additionalInfoFields in PassFields, next to backFields, so it
+  # lives inside the pass style block. At the top level Wallet ignores it.
+  def test_pass_json_writes_additionalInfoFields_inside_the_style_block
     fields = [{key: "doors", label: "DOORS", value: "7pm"}]
     path = with_subclass { define_method(:additional_info_fields) { fields } }
     json = read_pass_json(path)
-    assert_equal 1, json["additionalInfoFields"].size
-    assert_equal "doors", json["additionalInfoFields"][0]["key"]
+    assert_equal ["doors"], json["storeCard"]["additionalInfoFields"].map { |f| f["key"] }
+    refute json.key?("additionalInfoFields")
   end
 
   def test_pass_json_omits_additionalInfoFields_when_empty
     path = with_subclass { define_method(:additional_info_fields) { [] } }
-    refute read_pass_json(path).key?("additionalInfoFields")
+    json = read_pass_json(path)
+    refute json.key?("additionalInfoFields")
+    refute json["storeCard"].key?("additionalInfoFields")
+  end
+
+  # Hostile but legal field content must still produce a signed pass whose
+  # JSON round-trips byte for byte: emoji, right-to-left text, quotes and
+  # control characters, very long strings, and many back fields.
+  [
+    ["emoji", "🎟️ Show 🎶"],
+    ["right-to-left", "مرحبا بكم في الحفل"],
+    ["quotes and backslashes", %(He said "hi" \\ 'bye')],
+    ["control characters", "line one\nline two\ttab"],
+    ["long", "x" * 5_000]
+  ].each do |name, value|
+    define_method(:"test_signed_pass_round_trips_#{name.tr(" -", "__")}_values") do
+      path = with_subclass do
+        define_method(:header_fields) { [{key: "h", label: "Title", value: value}] }
+        define_method(:back_fields) { Array.new(60) { |i| {key: "b#{i}", label: "Line #{i}", value: value} } }
+      end
+      pkpass = PkpassHelpers.read_pkpass(path)
+      PkpassHelpers.verify_pkpass_signature!(pkpass)
+      assert_equal value, pkpass[:pass_json]["storeCard"]["headerFields"][0]["value"]
+      assert_equal 60, pkpass[:pass_json]["storeCard"]["backFields"].size
+      pkpass[:manifest].each do |file, sha1|
+        assert_equal sha1, Digest::SHA1.hexdigest(pkpass[:entry_bytes].fetch(file)), "manifest hash for #{file}"
+      end
+    end
+  end
+
+  # ------------------------------------------------------------------
+  # iOS 27: featuredActions, posterGeneric, suppressHeaderDarkening
+  # ------------------------------------------------------------------
+
+  def test_pass_json_includes_featuredActions_when_set
+    actions = [{identifier: "schedule", type: "viewSchedule", url: "https://example.com/agenda"}]
+    path = with_subclass { define_method(:featured_actions) { actions } }
+    assert_equal [{"identifier" => "schedule", "type" => "viewSchedule", "url" => "https://example.com/agenda"}],
+      read_pass_json(path)["featuredActions"]
+  end
+
+  def test_pass_json_omits_featuredActions_when_empty
+    path = with_subclass { define_method(:featured_actions) { [] } }
+    refute read_pass_json(path).key?("featuredActions")
+  end
+
+  def test_pass_json_writes_posterGeneric_beside_its_legacy_style
+    poster = {headerFields: [{key: "member", label: "Member", value: "Ana"}], footerFields: [{key: "tier", value: "Gold"}]}
+    path = with_subclass do
+      define_method(:pass_type) { :generic }
+      define_method(:poster_generic) { poster }
+    end
+    json = read_pass_json(path)
+    assert_equal ["tier"], json["posterGeneric"]["footerFields"].map { |f| f["key"] }
+    assert json.key?("generic"), "iOS 26 and earlier need the legacy style block beside posterGeneric"
+  end
+
+  # The dummy app's iOS 27 sample: a signed pass with both styles and two
+  # featured actions that the validator accepts.
+  def test_poster_generic_sample_builds_a_valid_signed_pass
+    pkpass = PkpassHelpers.read_pkpass(Passkit::Factory.create_pass(Passkit::UserMembershipCard, User.find(1)))
+    PkpassHelpers.verify_pkpass_signature!(pkpass)
+    json = pkpass[:pass_json]
+    assert_equal %w[member_name], json["posterGeneric"]["primaryFields"].map { |f| f["key"] }
+    assert_equal %w[member_name], json["generic"]["primaryFields"].map { |f| f["key"] }
+    assert_equal %w[membershipBenefits place], json["featuredActions"].map { |a| a["type"] }
+  end
+
+  def test_pass_json_omits_posterGeneric_when_nil
+    path = with_subclass { define_method(:poster_generic) { nil } }
+    refute read_pass_json(path).key?("posterGeneric")
+  end
+
+  def test_pass_json_includes_suppressHeaderDarkening_when_set
+    path = with_subclass { define_method(:suppress_header_darkening) { true } }
+    assert_equal true, read_pass_json(path)["suppressHeaderDarkening"]
+  end
+
+  def test_pass_json_includes_upcomingPassInformation_when_set
+    entries = [{identifier: "s1", name: "Keynote", type: "event", isActive: false}]
+    path = with_subclass { define_method(:upcoming_pass_information) { entries } }
+    assert_equal ["s1"], read_pass_json(path)["upcomingPassInformation"].map { |e| e["identifier"] }
+  end
+
+  # The work folder holds the unsigned pass, one per generation; only the
+  # zipped .pkpass is handed back to the caller.
+  def test_generate_and_sign_removes_its_work_folder
+    pass = Passkit::Pass.create!(klass: "Passkit::ExampleStoreCard")
+    generator = Passkit::Generator.new(pass)
+    path = generator.generate_and_sign
+    assert File.exist?(path)
+    refute File.exist?(Passkit::Generator::TMP_FOLDER.join(pass.file_name.to_s)), "work folder should be removed"
   end
 
   def test_pass_json_includes_eventLogoText_when_set

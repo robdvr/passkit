@@ -1,4 +1,5 @@
 require "time"
+require "uri"
 
 module Passkit
   # Validates a `pass.json` hash against Apple's PassKit schema, raising
@@ -9,13 +10,20 @@ module Passkit
   # Unknown semantic keys are intentionally accepted — Apple adds them every
   # iOS cycle, and a strict allowlist would force a gem release each time.
   # Only keys with known shapes are type-checked.
+  #
+  # Shapes, enums and the poster requirements follow Apple's own pass model
+  # and validators (github.com/apple/pass-builder, Sources/PassBuilder), which
+  # Pass Designer and `buildpass validate` run.
   class Validator
     COLOR_REGEX = /\Argb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)\z/
     URL_REGEX = /\Ahttps?:\/\//
 
     PASS_TYPES = %i[storeCard coupon eventTicket generic boardingPass].freeze
+    # Code39, Codabar, EAN13 and I2of5 (ITF) need iOS 27; list a QR or other
+    # older format after them so earlier versions still show a barcode.
     BARCODE_FORMATS = %w[
       PKBarcodeFormatQR PKBarcodeFormatPDF417 PKBarcodeFormatAztec PKBarcodeFormatCode128
+      PKBarcodeFormatCode39 PKBarcodeFormatCodabar PKBarcodeFormatEAN13 PKBarcodeFormatI2of5
     ].freeze
     DATE_STYLES = %w[
       PKDateStyleNone PKDateStyleShort PKDateStyleMedium PKDateStyleLong PKDateStyleFull
@@ -30,7 +38,20 @@ module Passkit
       PKDataDetectorTypePhoneNumber PKDataDetectorTypeLink
       PKDataDetectorTypeAddress PKDataDetectorTypeCalendarEvent
     ].freeze
-    PREFERRED_STYLE_SCHEMES = %w[posterEventTicket].freeze
+    # Apple pairs each semantic scheme with its fallback:
+    # ["posterEventTicket", "eventTicket"], ["semanticBoardingPass", "boardingPass"].
+    PREFERRED_STYLE_SCHEMES = %w[posterEventTicket eventTicket semanticBoardingPass boardingPass].freeze
+    # iOS 27 featured action types, from Apple's "Add Featured Actions" table.
+    FEATURED_ACTION_TYPES = %w[
+      viewSchedule watchTrailer listenToMusic call place addToBalance order shop
+      membershipBenefits bookAppointment bookCar bookFlight bookStay viewOffersRewards
+    ].freeze
+    MAX_FEATURED_ACTIONS = 2
+    MAX_LOCATIONS = 10
+    MAX_BEACONS = 10
+    FIELD_LIST_KEYS = %i[
+      headerFields primaryFields secondaryFields auxiliaryFields backFields additionalInfoFields footerFields
+    ].freeze
     EVENT_TYPES = %w[
       PKEventTypeGeneric PKEventTypeLivePerformance PKEventTypeMovie PKEventTypeSports
       PKEventTypeConference PKEventTypeConvention PKEventTypeWorkshop PKEventTypeSocialGathering
@@ -55,13 +76,15 @@ module Passkit
     COLOR_KEYS = %i[backgroundColor foregroundColor labelColor footerBackgroundColor].freeze
 
     class << self
-      def validate!(pass_hash)
-        errors = validate(pass_hash)
+      def validate!(pass_hash, files: nil)
+        errors = validate(pass_hash, files: files)
         return if errors.empty?
         raise Passkit::ValidationError, errors.join("; ")
       end
 
-      def validate(pass_hash)
+      # `files` is the list of file names in the pass folder (relative paths).
+      # When given, the required images are checked too.
+      def validate(pass_hash, files: nil)
         errors = []
         return ["pass must be a Hash"] unless pass_hash.is_a?(Hash)
 
@@ -83,6 +106,12 @@ module Passkit
         validate_additional_info_fields(pass_hash, errors)
         validate_relevant_dates(pass_hash, errors)
         validate_semantics(pass_hash[:semantics] || pass_hash["semantics"], errors)
+        validate_featured_actions(pass_hash, errors)
+        validate_poster_generic(pass_hash, errors)
+        validate_upcoming_pass_information(pass_hash, errors)
+        validate_max_distance(pass_hash, errors)
+        validate_poster_event_ticket(pass_hash, files, errors)
+        validate_files(files, errors) if files
 
         errors
       end
@@ -138,7 +167,7 @@ module Passkit
       end
 
       def validate_booleans(pass, errors)
-        %i[sharingProhibited suppressStripShine voided useAutomaticColors].each do |key|
+        %i[sharingProhibited suppressStripShine voided useAutomaticColors suppressHeaderDarkening].each do |key|
           val = fetch(pass, key)
           next if val.nil?
           unless val == true || val == false
@@ -181,23 +210,34 @@ module Passkit
             errors << "#{type} block must be a Hash"
             next
           end
-          %i[headerFields primaryFields secondaryFields auxiliaryFields backFields].each do |fkey|
-            fields = fetch(block, fkey)
-            next if fields.nil?
-            unless fields.is_a?(Array)
-              errors << "#{type}.#{fkey} must be an Array"
-              next
-            end
-            fields.each_with_index do |field, i|
-              validate_pass_field_content(field, "#{type}.#{fkey}[#{i}]", errors)
-            end
-          end
+          validate_field_lists(block, type, errors)
           if type == :boardingPass
             tt = fetch(block, :transitType)
             if tt && !TRANSIT_TYPES.include?(tt)
               errors << "boardingPass.transitType must be one of #{TRANSIT_TYPES.join(", ")} — got #{tt.inspect}"
             end
           end
+        end
+      end
+
+      # Validates every field list of a style block (a PassFields object) and
+      # that no two of its fields share a key, which Wallet refuses.
+      def validate_field_lists(block, label, errors)
+        keys = []
+        FIELD_LIST_KEYS.each do |fkey|
+          fields = fetch(block, fkey)
+          next if fields.nil?
+          unless fields.is_a?(Array)
+            errors << "#{label}.#{fkey} must be an Array"
+            next
+          end
+          fields.each_with_index do |field, i|
+            validate_pass_field_content(field, "#{label}.#{fkey}[#{i}]", errors)
+            keys << fetch(field, :key) if field.is_a?(Hash) && fetch(field, :key)
+          end
+        end
+        keys.tally.each do |key, count|
+          errors << "#{label} has duplicate field key #{key.inspect}" if count > 1
         end
       end
 
@@ -215,6 +255,25 @@ module Passkit
         validate_enum(fetch(field, :timeStyle), DATE_STYLES, "#{label}.timeStyle", errors)
         validate_enum(fetch(field, :numberStyle), NUMBER_STYLES, "#{label}.numberStyle", errors)
         validate_enum(fetch(field, :textAlignment), TEXT_ALIGNMENTS, "#{label}.textAlignment", errors)
+        if fetch(field, :dateStyle) || fetch(field, :timeStyle)
+          value = fetch(field, :value)
+          unless value.is_a?(String) && iso8601?(value)
+            errors << "#{label}.value must be ISO 8601 when dateStyle or timeStyle is set — got #{value.inspect}"
+          end
+        end
+        %i[ignoresTimeZone isRelative].each do |flag|
+          val = fetch(field, flag)
+          next if val.nil? || val == true || val == false
+          errors << "#{label}.#{flag} must be boolean — got #{val.inspect}"
+        end
+        change_message = fetch(field, :changeMessage)
+        if change_message && !(change_message.is_a?(String) && change_message.include?("%@"))
+          errors << "#{label}.changeMessage must contain %@ (the new value) — got #{change_message.inspect}"
+        end
+        currency = fetch(field, :currencyCode)
+        if currency && !(currency.is_a?(String) && currency.match?(/\A[A-Z]{3}\z/))
+          errors << "#{label}.currencyCode must be a 3-letter ISO 4217 code — got #{currency.inspect}"
+        end
         ddt = fetch(field, :dataDetectorTypes)
         if ddt
           if ddt.is_a?(Array)
@@ -241,6 +300,7 @@ module Passkit
           errors << "locations must be an Array"
           return
         end
+        errors << "locations holds at most #{MAX_LOCATIONS} entries — got #{locs.size}" if locs.size > MAX_LOCATIONS
         locs.each_with_index do |loc, i|
           validate_location_object(loc, "locations[#{i}]", errors, require_lat_lon: true)
         end
@@ -268,6 +328,7 @@ module Passkit
           errors << "beacons must be an Array"
           return
         end
+        errors << "beacons holds at most #{MAX_BEACONS} entries — got #{beacons.size}" if beacons.size > MAX_BEACONS
         beacons.each_with_index do |b, i|
           unless b.is_a?(Hash)
             errors << "beacons[#{i}] must be a Hash"
@@ -369,14 +430,11 @@ module Passkit
         end
       end
 
+      # Apple defines additionalInfoFields in PassFields, beside backFields.
+      # At the top level of pass.json Wallet ignores it.
       def validate_additional_info_fields(pass, errors)
-        fields = fetch(pass, :additionalInfoFields)
-        return if fields.nil?
-        unless fields.is_a?(Array)
-          errors << "additionalInfoFields must be an Array"
-          return
-        end
-        fields.each_with_index { |f, i| validate_pass_field_content(f, "additionalInfoFields[#{i}]", errors) }
+        return if fetch(pass, :additionalInfoFields).nil?
+        errors << "additionalInfoFields belongs inside the pass style block (e.g. eventTicket), not at the top level"
       end
 
       def validate_relevant_dates(pass, errors)
@@ -392,10 +450,12 @@ module Passkit
             errors << "#{label} must be a Hash"
             next
           end
+          date_str = fetch(entry, :date)
           start_str = fetch(entry, :startDate)
           end_str = fetch(entry, :endDate)
+          parse_iso(date_str, "#{label}.date", errors) unless date_str.nil?
           if start_str.nil?
-            errors << "#{label}.startDate is required"
+            errors << "#{label} needs date or startDate" if date_str.nil?
             next
           end
           start_t = parse_iso(start_str, "#{label}.startDate", errors)
@@ -415,9 +475,135 @@ module Passkit
 
       def parse_iso(str, label, errors)
         Time.iso8601(str)
-      rescue ArgumentError
+      rescue ArgumentError, TypeError
         errors << "#{label} is not valid ISO 8601 — got #{str.inspect}"
         nil
+      end
+
+      def iso8601?(str)
+        Time.iso8601(str)
+        true
+      rescue ArgumentError, TypeError
+        false
+      end
+
+      def validate_featured_actions(pass, errors)
+        actions = fetch(pass, :featuredActions)
+        return if actions.nil?
+        unless actions.is_a?(Array)
+          errors << "featuredActions must be an Array"
+          return
+        end
+        if actions.size > MAX_FEATURED_ACTIONS
+          errors << "featuredActions holds at most #{MAX_FEATURED_ACTIONS} actions — got #{actions.size}"
+        end
+        identifiers = []
+        actions.each_with_index do |action, i|
+          label = "featuredActions[#{i}]"
+          unless action.is_a?(Hash)
+            errors << "#{label} must be a Hash"
+            next
+          end
+          identifier = fetch(action, :identifier)
+          if identifier.is_a?(String) && !identifier.empty?
+            identifiers << identifier
+          else
+            errors << "#{label}.identifier is required"
+          end
+          type = fetch(action, :type)
+          unless FEATURED_ACTION_TYPES.include?(type)
+            errors << "#{label}.type must be one of #{FEATURED_ACTION_TYPES.join(", ")} — got #{type.inspect}"
+          end
+          url = fetch(action, :url)
+          if url && !absolute_url?(url)
+            errors << "#{label}.url must be an absolute URL — got #{url.inspect}"
+          end
+        end
+        errors << "featuredActions identifiers must be unique" if identifiers.uniq.size != identifiers.size
+      end
+
+      def absolute_url?(value)
+        return false unless value.is_a?(String) && !value.match?(/\s/)
+        uri = URI.parse(value)
+        uri.scheme.present? && (uri.host.present? || uri.opaque.present?)
+      rescue URI::InvalidURIError
+        false
+      end
+
+      # iOS 27 Poster Generic: a PassFields object Wallet prefers over the
+      # legacy style block, which still has to be present for iOS 26.
+      def validate_poster_generic(pass, errors)
+        block = fetch(pass, :posterGeneric)
+        return if block.nil?
+        unless block.is_a?(Hash)
+          errors << "posterGeneric block must be a Hash"
+          return
+        end
+        validate_field_lists(block, :posterGeneric, errors)
+      end
+
+      def validate_upcoming_pass_information(pass, errors)
+        entries = fetch(pass, :upcomingPassInformation)
+        return if entries.nil?
+        unless entries.is_a?(Array)
+          errors << "upcomingPassInformation must be an Array"
+          return
+        end
+        entries.each_with_index do |entry, i|
+          label = "upcomingPassInformation[#{i}]"
+          unless entry.is_a?(Hash)
+            errors << "#{label} must be a Hash"
+            next
+          end
+          identifier = fetch(entry, :identifier)
+          errors << "#{label}.identifier is required" unless identifier.is_a?(String) && !identifier.empty?
+          active = fetch(entry, :isActive)
+          errors << "#{label}.isActive must be boolean — got #{active.inspect}" unless active.nil? || active == true || active == false
+          sem = fetch(entry, :semantics)
+          validate_semantics(sem, errors, label: "#{label}.semantics") if sem
+        end
+      end
+
+      def validate_max_distance(pass, errors)
+        distance = fetch(pass, :maxDistance)
+        return if distance.nil?
+        return if distance.is_a?(Numeric) && distance >= 0
+        errors << "maxDistance must be a non-negative number of meters — got #{distance.inspect}"
+      end
+
+      # Apple's EventTicketValidator: an eventTicket that asks for the poster
+      # scheme must carry NFC (poster tickets are NFC-entry), the event and
+      # venue names, and an artwork or background image. Wallet falls back to
+      # the plain event ticket otherwise, silently, so fail at build time.
+      def validate_poster_event_ticket(pass, files, errors)
+        schemes = fetch(pass, :preferredStyleSchemes)
+        return unless schemes.is_a?(Array) && schemes.include?("posterEventTicket") && fetch(pass, :eventTicket)
+
+        nfc = fetch(pass, :nfc)
+        if nfc.nil?
+          errors << "posterEventTicket needs nfc (poster event tickets are NFC entry)"
+        elsif nfc.is_a?(Hash) && fetch(nfc, :requiresAuthentication).nil?
+          errors << "posterEventTicket needs nfc.requiresAuthentication"
+        end
+
+        sem = fetch(pass, :semantics) || {}
+        required = %i[eventName venueName]
+        case fetch(sem, :eventType)
+        when "PKEventTypeSports" then required += %i[awayTeamAbbreviation homeTeamAbbreviation]
+        when "PKEventTypeLivePerformance" then required += %i[performerNames]
+        end
+        required.each do |key|
+          val = fetch(sem, key)
+          errors << "posterEventTicket needs semantics.#{key}" if val.nil? || (val.respond_to?(:empty?) && val.empty?)
+        end
+
+        if files&.none? { |f| f.match?(%r{\A(artwork|background)(@[23]x)?\.png\z}) }
+          errors << "posterEventTicket needs an artwork or background image"
+        end
+      end
+
+      def validate_files(files, errors)
+        errors << "icon.png is required" unless files.include?("icon.png")
       end
 
       # Known semantic sub-object shapes get type-checked. Unknown keys are
@@ -452,7 +638,7 @@ module Passkit
           priorityStatus securityScreening departureLocationDescription
           destinationLocationDescription departureCityName destinationCityName
           departureLocationTimeZone destinationLocationTimeZone airlineCode
-          flightCode flightNumber departureAirportCode departureAirportName
+          flightCode departureAirportCode departureAirportName
           departureAirportTerminal departureAirportGate destinationAirportCode
           destinationAirportName destinationAirportTerminal destinationAirportGate
           carNumber departurePlatform destinationPlatform departureStationName
@@ -460,6 +646,10 @@ module Passkit
           ticketFareClass entranceDescription leagueName leagueAbbreviation
           sportName homeTeamName homeTeamLocation homeTeamAbbreviation
           awayTeamName awayTeamLocation awayTeamAbbreviation
+          venueEntrance venueEntranceDoor venueEntranceGate venueEntrancePortal
+          departureTerminal departureGate destinationTerminal destinationGate
+          departureAirportTimeZone destinationAirportTimeZone airlineLoungePlaceID
+          boardingSequenceNumber internationalDocumentsVerifiedDeclarationName
         ].each do |key|
           val = fetch(sem, key)
           next if val.nil?
@@ -477,12 +667,12 @@ module Passkit
           end
         end
 
-        # Numeric-typed keys
-        %i[duration boardingSequenceNumber].each do |key|
+        # Integer-typed keys (Apple's model: `duration` seconds, `flightNumber`)
+        %i[duration flightNumber].each do |key|
           val = fetch(sem, key)
           next if val.nil?
-          unless val.is_a?(Numeric)
-            errors << "#{label}.#{key} must be Numeric — got #{val.inspect}"
+          unless val.is_a?(Integer)
+            errors << "#{label}.#{key} must be Integer — got #{val.inspect}"
           end
         end
 
@@ -492,6 +682,7 @@ module Passkit
           passengerCapabilities passengerAirlineSSRs passengerInformationSSRs
           passengerServiceSSRs passengerEligibleSecurityPrograms
           departureLocationSecurityPrograms destinationLocationSecurityPrograms
+          departureAirportSecurityPrograms destinationAirportSecurityPrograms
         ].each do |key|
           val = fetch(sem, key)
           next if val.nil?
@@ -509,9 +700,6 @@ module Passkit
         end
         if (loc = fetch(sem, :destinationLocation))
           validate_location_object(loc, "#{label}.destinationLocation", errors, require_lat_lon: true)
-        end
-        if (entrance = fetch(sem, :venueEntrance))
-          validate_location_object(entrance, "#{label}.venueEntrance", errors, require_lat_lon: false)
         end
         if (price = fetch(sem, :totalPrice))
           validate_currency_amount(price, "#{label}.totalPrice", errors)

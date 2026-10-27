@@ -17,6 +17,7 @@ class TestPasskitPass < ActiveSupport::TestCase
     :boarding_pass,
     :description,
     :expiration_date,
+    :featured_actions,
     :file_name,
     :foreground_color,
     :format_version,
@@ -32,14 +33,18 @@ class TestPasskitPass < ActiveSupport::TestCase
     :pass_path,
     :pass_type,
     :pass_type_identifier,
+    :poster_generic,
     :primary_fields,
     :relevant_date,
     :secondary_fields,
     :semantics,
     :sharing_prohibited,
+    :suppress_header_darkening,
     :suppress_strip_shine,
+    :upcoming_pass_information,
     :user_info,
     :voided,
+    :web_service_status,
     :web_service_url
   ].freeze
 

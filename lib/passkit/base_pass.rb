@@ -244,11 +244,49 @@ module Passkit
       nil
     end
 
-    # iOS 18+ additional info row(s) shown in the pass detail view.
+    # Additional info row(s) shown in the pass detail view.
     # Returns an array of PassFieldContent hashes (same shape as
-    # `header_fields` etc.: `{key:, label:, value:, ...}`).
+    # `header_fields` etc.: `{key:, label:, value:, ...}`). Written inside the
+    # pass style block, where Apple's PassFields defines it.
     def additional_info_fields
       []
+    end
+
+    # iOS 27+ featured actions: up to two tiles Wallet shows under the pass,
+    # on every pass style. Each entry is `{identifier:, type:, url:}`, where
+    # `type` is one of Passkit::Validator::FEATURED_ACTION_TYPES.
+    def featured_actions
+      []
+    end
+
+    # iOS 27+ Poster Generic style. Returns nil (omit) or a PassFields hash
+    # (`{headerFields:, primaryFields:, footerFields:, backFields:,
+    # additionalInfoFields:}`). Wallet prefers it when present; the regular
+    # `pass_type` block is still written as the iOS 26 and earlier fallback,
+    # so keep its fields populated too. Only the first footer field shows.
+    def poster_generic
+      nil
+    end
+
+    # iOS 18+ poster event tickets: hide the header darkening gradient.
+    # Boolean, or nil to omit.
+    def suppress_header_darkening
+      nil
+    end
+
+    # iOS 26+ upcoming events list of a poster event ticket. An array of
+    # UpcomingPassInformationEntry hashes (`{identifier:, name:, type: "event",
+    # dateInformation:, isActive:, semantics:, ...}`).
+    def upcoming_pass_information
+      []
+    end
+
+    # Whether the PassKit web service may still serve this pass to a device
+    # that holds it. `:ok` serves it; `:gone` answers 410 so Wallet stops
+    # asking. To show a pass as void instead, keep `:ok` and return true from
+    # `voided` (and drop the barcode).
+    def web_service_status
+      :ok
     end
 
     # iOS 18+ branded text shown next to the event logo on the poster face.
