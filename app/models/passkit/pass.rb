@@ -29,6 +29,7 @@ module Passkit
       :directions_information_url,
       :event_logo_text,
       :expiration_date,
+      :featured_actions,
       :file_name,
       :footer_background_color,
       :foreground_color,
@@ -49,6 +50,7 @@ module Passkit
       :pass_path,
       :pass_type,
       :pass_type_identifier,
+      :poster_generic,
       :preferred_style_schemes,
       :primary_fields,
       :purchase_parking_url,
@@ -58,12 +60,15 @@ module Passkit
       :sell_url,
       :semantics,
       :sharing_prohibited,
+      :suppress_header_darkening,
       :suppress_strip_shine,
       :transfer_url,
       :transit_information_url,
+      :upcoming_pass_information,
       :use_automatic_colors,
       :user_info,
       :voided,
+      :web_service_status,
       :web_service_url,
       to: :instance
 
@@ -80,11 +85,33 @@ module Passkit
     # subclasses is strongly recommended (an empty allowlist disables the
     # check for backward compatibility).
     def instance
-      @instance ||= klass.constantize.new(generator)
+      @instance ||= klass.constantize.new(generator).tap { |pass| pass.passkit_pass = self }
     end
 
     def last_update
       instance.last_update || updated_at
+    end
+
+    PUSH_BATCH_SIZE = 500
+
+    # Records that this pass changed (updated_at feeds the web service's
+    # "which serials changed" answer) and, when push is enabled, tells the
+    # devices that hold it.
+    def mark_updated!
+      self.class.mark_updated!(self.class.where(id: id))
+    end
+
+    # Bulk form for a relation (e.g. every ticket of an event): one UPDATE,
+    # and one push job per `batch_size` passes. Returns the number of passes.
+    def self.mark_updated!(scope, batch_size: PUSH_BATCH_SIZE)
+      ids = scope.pluck(:id)
+      return 0 if ids.empty?
+
+      where(id: ids).update_all(updated_at: Time.current)
+      if Passkit.configuration&.push_enabled
+        ids.each_slice(batch_size) { |batch| Passkit::PushUpdateJob.perform_later(batch) }
+      end
+      ids.size
     end
   end
 end

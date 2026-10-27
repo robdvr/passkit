@@ -1,4 +1,30 @@
-## [Unreleased]
+## [1.1.0] - 2026-10-27
+
+Brought in line with Apple's own pass model and validators (github.com/apple/pass-builder, WWDC26) and the iOS 27 additions.
+
+### Added
+- **APNs pass update pushes (details).** A transient failure raises `Passkit::PushError` naming the devices still owed a push, and the job retries those only, up to 5 attempts; a certificate or topic error raises `Passkit::PushFatalError`, which is reported through `Rails.error` and not retried; three unanswered pushes in a row end the batch. Hosts on MySQL should check `passkit_passes.updated_at` has `precision: 6`.
+- **APNs pass update pushes.** `Passkit::Push` sends Apple's update push (pass type certificate, topic = pass type identifier, `{}` payload, production APNs) to every token registered for a set of passes, removes devices whose token APNs rejects, retries timeouts/429/5xx through `Passkit::PushUpdateJob` and stops at once on a certificate or topic error. `Passkit::Pass#mark_updated!` / `Passkit::Pass.mark_updated!(scope)` touch the rows and enqueue the job. Off unless `config.push_enabled`. New runtime dependency: `apnotic`.
+- **iOS 27:** `featured_actions` (up to two, Apple's 14 types), `poster_generic` (Poster Generic style beside its legacy block), the barcode formats Code39, Codabar, EAN13 and I2of5. `upcoming_pass_information` (iOS 26) and `suppress_header_darkening` (iOS 18) hooks.
+- **`BasePass#web_service_status`**: return `:gone` and the web service answers 410 for that pass.
+- **A pass without a web service:** when `web_service_url` is nil the generator omits `webServiceURL` and `authenticationToken` (they were written as null, which strict Wallet versions refuse).
+- **`BasePass#passkit_pass`**: the `Passkit::Pass` row a pass is built for, so a subclass can read what it recorded at issue (`data`) or its `updated_at`.
+- **Validator:** Apple's poster event ticket requirements (NFC with `requiresAuthentication`, event and venue names, sports and live performance tags, an artwork or background image), unique field keys per style block, `changeMessage` must contain `%@`, date-styled field values must be ISO 8601, field `ignoresTimeZone` / `isRelative` / `currencyCode`, at most 10 locations and 10 beacons, `maxDistance`, `featuredActions`, `posterGeneric`, `upcomingPassInformation`. `Validator.validate(pass, files:)` also checks the images.
+
+### Fixed
+- **`additionalInfoFields` was written at the top level of pass.json**, where Wallet ignores it. Apple defines it in PassFields, so it now goes inside the pass style block; the validator refuses it at the top level.
+- **Changed-serials race.** `lastUpdated` was the clock at response time, so a pass written between the query and the response fell behind the tag and was never listed. It is now the newest `updated_at` among the passes listed (to the microsecond), and the filter is `updated_at > passesUpdatedSince`.
+- **Validator types that rejected valid passes:** `semantics.venueEntrance` is a String (the entrance's name), `flightNumber` and `duration` are Integers, `boardingSequenceNumber` is a String; `preferredStyleSchemes` accepts `eventTicket`, `semanticBoardingPass` and `boardingPass`; a `relevantDates` entry may be a single `date`.
+- **`GET passes/:type/:serial`** rebuilt and re-signed the pass before answering 304; an unchanged pass now answers 304 straight away. The authentication token is compared in constant time (the registration endpoints too).
+- **The changed-serials request for an unknown device** answers 204 (Apple: no matching passes) instead of 404.
+- **`POST log`** (unauthenticated by Apple's spec) stores at most 50 entries of 2,000 characters per request, in one insert.
+- **The generator left its unsigned work folder** in `tmp/passkit` after every pass; it is now removed once the `.pkpass` is written. The folder and the `.pkpass` are named per generation, so two builds of one pass at once (a host with a fixed `file_name`) never share or delete each other's files.
+- **`ExampleStoreCard`** used `currencyCode: "$"`; ISO 4217 needs `USD`.
+
+### Changed
+- A pass that asks for `posterEventTicket` without NFC, the event and venue names or an artwork/background image now fails validation. Wallet showed the plain event ticket for it anyway, silently.
+
+## [1.0.0]
 
 ### Breaking changes
 - **Rails / Ruby floor raised.** Now requires Rails ≥ 8.0 and Ruby ≥ 3.4. The dummy app and tests run against Rails 8.1.3 / Ruby 3.4.x.

@@ -13,6 +13,21 @@ module Passkit
 
   class ValidationError < Error; end
 
+  # A pass update push that may succeed later (timeout, 429, 5xx), naming the
+  # devices still owed one so a retry reaches only those.
+  class PushError < Error
+    attr_reader :failed_device_ids
+
+    def initialize(message = nil, failed_device_ids: [])
+      super(message)
+      @failed_device_ids = failed_device_ids
+    end
+  end
+
+  # APNs refused the request itself (certificate, topic, payload): every push
+  # would fail the same way, so it is not retried.
+  class PushFatalError < Error; end
+
   class << self
     attr_accessor :configuration
   end
@@ -32,7 +47,9 @@ module Passkit
       :pass_type_identifier,
       :pass_classes,
       :pass_generators,
-      :validate_pass_json
+      :validate_pass_json,
+      :push_enabled,
+      :push_type
 
     DEFAULT_AUTHENTICATION = proc do
       authenticate_or_request_with_http_basic("Passkit Dashboard. Login required") do |username, password|
@@ -56,6 +73,13 @@ module Passkit
       # shapes. Disable as a temporary escape hatch if the validator rejects
       # something Apple actually accepts; please file an issue alongside.
       @validate_pass_json = true
+      # Off by default so test, CI and local runs never reach APNs. When
+      # true, Pass#mark_updated! enqueues Passkit::PushUpdateJob.
+      @push_enabled = false
+      # The apns-push-type header. Apple documents the topic, certificate and
+      # empty payload of a pass update push but not this header; apnotic's
+      # default is "alert".
+      @push_type = "alert"
       @web_service_host = ENV["PASSKIT_WEB_SERVICE_HOST"] || (raise "Please set PASSKIT_WEB_SERVICE_HOST")
       raise("PASSKIT_WEB_SERVICE_HOST must start with https://") unless @web_service_host.start_with?("https://")
       @certificate_key = ENV["PASSKIT_CERTIFICATE_KEY"] || (raise "Please set PASSKIT_CERTIFICATE_KEY")

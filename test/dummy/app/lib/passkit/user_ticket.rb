@@ -17,6 +17,8 @@ module Passkit
     VENUE_NAME = "Sample Venue".freeze
     VENUE_LAT = 41.22476226066285
     VENUE_LON = -95.92879374051269
+    # Placeholder: a real NFC pass carries the reader's ECDH public key.
+    SAMPLE_NFC_PUBLIC_KEY = "MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgAD".freeze
 
     def pass_type
       :eventTicket
@@ -30,9 +32,21 @@ module Passkit
       "Event ticket for #{EVENT_NAME}"
     end
 
-    # iOS 18+ poster-style layout opt-in. iOS ≤17 ignores this key.
+    # iOS 18+ poster-style layout opt-in, with Apple's fallback scheme.
+    # Poster event tickets are NFC entry: Wallet falls back to the plain
+    # event ticket without `nfc`, the event and venue names and an artwork
+    # (or background) image. iOS ≤17 ignores this key.
     def preferred_style_schemes
-      ["posterEventTicket"]
+      ["posterEventTicket", "eventTicket"]
+    end
+
+    def nfc
+      {message: "ticket-#{@generator&.id}", encryptionPublicKey: SAMPLE_NFC_PUBLIC_KEY, requiresAuthentication: false}
+    end
+
+    # The poster face shows `artwork.png`; the sample reuses the logo.
+    def add_other_files(path)
+      FileUtils.cp(File.join(pass_path, "logo.png"), File.join(path, "artwork.png"))
     end
 
     # iOS 18+ branded text shown next to the event logo on the poster face.
@@ -95,7 +109,7 @@ module Passkit
     # iOS 18+ supplementary rows in the detail view (parking, food, etc.).
     def additional_info_fields
       [
-        {key: "doors", label: "DOORS", value: (event_start - 1.hour).iso8601,
+        {key: "doors_open", label: "DOORS", value: (event_start - 1.hour).iso8601,
          dateStyle: "PKDateStyleNone", timeStyle: "PKDateStyleShort"},
         {key: "duration", label: "DURATION", value: "Approx. 3 hours"}
       ]
@@ -138,7 +152,7 @@ module Passkit
         genre: "Live Performance",
         venueName: VENUE_NAME,
         venueLocation: {latitude: VENUE_LAT, longitude: VENUE_LON},
-        venueEntrance: {latitude: 41.2273414693647, longitude: -95.92925748878405},
+        venueEntrance: "North Entrance",
         venueDoorsOpenDate: (event_start - 1.hour).iso8601,
         eventStartDate: event_start.iso8601,
         eventEndDate: (event_start + 3.hours).iso8601,

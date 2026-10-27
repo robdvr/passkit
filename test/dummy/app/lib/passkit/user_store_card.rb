@@ -67,7 +67,7 @@ module Passkit
         key: "balance",
         label: "Balance",
         value: 100,
-        currencyCode: "$"
+        currencyCode: "USD"
       }]
     end
 

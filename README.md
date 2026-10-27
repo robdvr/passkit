@@ -6,7 +6,7 @@
 
 The same signed `.pkpass` file URL is served to every client. What happens next depends on the device:
 
-* **iOS** — Apple Wallet opens the file natively. Full PassKit Web Service integration: registration, per-device update polling, `Last-Modified`-based 304s.
+* **iOS** — Apple Wallet opens the file natively. Full PassKit Web Service integration: registration, the changed-serials list, `Last-Modified`-based 304s, and APNs update pushes (see "Pass updates flow").
 * **Android** — the device receives `application/vnd.apple.pkpass` and offers it to whichever installed app handles that MIME type. **Google Wallet does *not* natively read `.pkpass`** — users without a third-party reader (PassWallet, etc.) will see a "no app to open" dialog. There is no registration or update protocol on Android; the user gets the file once, and that's it.
 * **Bundles (`.pkpasses`)** — when `collection_name` is set on a URL, the controller branches on User-Agent. Apple Wallet UAs (`PassKit/*`, `Wallet/*`) get the spec `.pkpasses` zip. Browsers and Android clients get an HTML index instead, with one download link per pass — because no Android reader understands `.pkpasses`.
 
@@ -26,7 +26,6 @@ Do you have a QRCode or a Barcode anywhere in your app that you want to distribu
 **We don't provide (yet):**
 
 * A fancy dashboard: our dashboard is really really simple right now. Pull requests are welcome!
-* Push notifications: APNs is not implemented. `push_token` is captured by the registration endpoint but never used to send updates. Pull requests are welcome!
 * Native Google Wallet API integration: see "How cross-platform support actually works" above.
 
 ## Installation
@@ -107,6 +106,9 @@ Passkit.configure do |config|
     warden.authenticate! scope: :user
     # redirect_to main_app.root_path unless warden.user.admin?
   end
+
+  # APNs pass update pushes (off by default). See "Pass updates flow".
+  config.push_enabled = ENV["PASSKIT_PUSH_ENABLED"] == "1"
 end
 ```
 
@@ -257,7 +259,7 @@ iOS 18 introduced a poster-style event ticket layout: full-bleed background, pro
 # app/lib/my_app/concert_ticket.rb
 class MyApp::ConcertTicket < Passkit::BasePass
   def pass_type             = :eventTicket
-  def preferred_style_schemes = ["posterEventTicket"]
+  def preferred_style_schemes = ["posterEventTicket", "eventTicket"]
   def event_logo_text       = "FEST 2026"
 
   # Detail-view rows (iOS 18+).
@@ -294,7 +296,7 @@ def semantics
     genre: "Live Performance",
     venueName: "The Greek Theatre",
     venueLocation: { latitude: 37.8702, longitude: -122.2553 },
-    venueEntrance: { latitude: 37.8704, longitude: -122.2555 }, # iOS 18+
+    venueEntrance: "North Gate",                                 # iOS 18+, a name
     venueDoorsOpenDate: ticket.doors_at.iso8601,                 # iOS 18+
     eventStartDate:    ticket.starts_at.iso8601,
     eventEndDate:      ticket.ends_at.iso8601,
@@ -311,10 +313,18 @@ end
 **Caveats:**
 
 * The poster-style layout requires iOS 18 or later. On iOS ≤17 the new keys are silently ignored and Wallet renders the legacy `header/primary/secondary/auxiliary` field arrays — keep them populated.
-* NFC may be required for the poster style to actually activate (community-reported, not Apple-documented). If your test pass installs but renders as the legacy card on iOS 18+, populate `nfc` (`{ message:, encryptionPublicKey:, requiresAuthentication: }`) and re-test.
+* Poster event tickets are NFC entry. Apple's own validator ([pass-builder](https://github.com/apple/pass-builder), `EventTicketValidator`) requires `nfc` with `requiresAuthentication`, `semantics.eventName` and `semantics.venueName` (plus team abbreviations for sports and `performerNames` for live performance), and an `artwork` or `background` image. Wallet falls back to the plain event ticket without them, silently, so `Passkit::Validator` refuses a `posterEventTicket` pass that misses one. A QR-entry ticket should not ask for the poster scheme. List Apple's fallback with it: `["posterEventTicket", "eventTicket"]`.
 * The `Passkit::Validator` runs every generated `pass.json` through a schema check before signing. If you hit a `Passkit::ValidationError` on a shape Apple actually accepts, set `Passkit.configuration.validate_pass_json = false` as a temporary escape hatch and file an issue.
 
 The bundled [`Passkit::UserTicket`](test/dummy/app/lib/passkit/user_ticket.rb) is a complete enhanced-layout reference — it sets every iOS 18+ key, populates the expanded semantic tags, ships venue utility URLs, and includes English + Spanish localized strings (next section).
+
+#### iOS 27: featured actions and Poster Generic
+
+`featured_actions` adds up to two tiles under any pass, each `{identifier:, type:, url:}` with one of Apple's 14 types (`Passkit::Validator::FEATURED_ACTION_TYPES`: `viewSchedule`, `watchTrailer`, `listenToMusic`, `call`, `place`, `addToBalance`, `order`, `shop`, `membershipBenefits`, `bookAppointment`, `bookCar`, `bookFlight`, `bookStay`, `viewOffersRewards`).
+
+`poster_generic` returns a PassFields hash for the iOS 27 Poster Generic style (`headerFields`, up to four `primaryFields`, `footerFields`, `backFields`, `additionalInfoFields`). Wallet prefers it; the regular `pass_type` block (e.g. `:generic`) is still written for iOS 26 and earlier, so populate both. [`Passkit::UserMembershipCard`](test/dummy/app/lib/passkit/user_membership_card.rb) is a complete example.
+
+iOS 27 also adds the barcode formats `PKBarcodeFormatCode39`, `PKBarcodeFormatCodabar`, `PKBarcodeFormatEAN13` and `PKBarcodeFormatI2of5`. Earlier versions show no barcode for them, so list an older format after one.
 
 #### Localized event tickets
 
@@ -399,9 +409,16 @@ and view it at `http://localhost:3000/rails/mailers/`.
 
 ### Pass updates flow (iOS only)
 
-When iOS Wallet installs a `.pkpass`, it registers the device against the gem's PassKit Web Service endpoints. From then on, iOS periodically polls `webServiceURL` and uses the `Last-Modified` response header to decide whether to fetch a fresh `pass.json`.
+When iOS Wallet installs a `.pkpass`, it registers the device (and its APNs push token) against the gem's PassKit Web Service endpoints. Wallet does **not** poll on a schedule: it asks for changes when it receives a push, or when the user pulls to refresh the pass.
 
-The header is derived automatically: `Passkit::Pass#last_update` returns `instance.last_update || updated_at`, and `Passkit::BasePass#last_update` returns `@generator&.updated_at`. So whenever your generator AR record is `touch`ed or updated, the next poll picks up the new pass — no extra wiring needed.
+1. Something the pass shows changes. Call `Passkit::Pass#mark_updated!` (one pass) or `Passkit::Pass.mark_updated!(scope)` (many: one UPDATE, one push job per 500 passes). It touches `passkit_passes.updated_at` and, with `config.push_enabled`, enqueues `Passkit::PushUpdateJob`.
+2. `Passkit::Push` sends Apple's update push to every registered token: signed with the pass type certificate that signs the passes, topic = the pass type identifier, payload `{}`, production APNs (pass updates don't work on the sandbox). A token APNs rejects (410, `BadDeviceToken`, …) removes its device; timeouts, 429 and 5xx raise `Passkit::PushError` after the batch so the job retries; a certificate or topic error stops at once.
+3. Wallet asks which serials changed since its last tag. The answer lists passes whose `updated_at` is newer, and its `lastUpdated` is the newest `updated_at` listed (not the clock, so a pass written during the query is still listed next time).
+4. Wallet fetches each pass. `Last-Modified` comes from `Passkit::Pass#last_update` (`instance.last_update || updated_at`; `BasePass#last_update` is `@generator&.updated_at`). An unchanged pass answers 304 without being rebuilt.
+
+A field with a `changeMessage` (it must contain `%@`, the new value) turns its change into a lock screen notification, e.g. `changeMessage: "Doors now open at %@"`.
+
+To retire a pass, for example when its ticket moves to someone else, return `:gone` from `BasePass#web_service_status`: the web service answers 410 and Wallet stops asking. To show it as void instead, keep `:ok`, return `true` from `voided` and drop the barcode.
 
 If you need different timing (e.g. only count specific column changes as updates), override `last_update` in your subclass:
 
@@ -411,7 +428,16 @@ def last_update
 end
 ```
 
-Push notifications (APNs) to nudge devices to poll *now* are not implemented in this gem — devices update on their own polling schedule.
+Pushes need nothing beyond the signing certificate already configured. Keep `push_enabled` off in test, CI and development.
+
+Two things to know before turning it on:
+
+- **`config.push_type`** (`apns-push-type`) defaults to `"alert"`, apnotic's default. Apple documents the certificate, topic and empty payload of a pass update push, but not this header. Confirm an update lands on a real device before relying on it in production.
+- **Timestamp cursors.** The changed-serials tag is the newest `passkit_passes.updated_at` listed, filtered with `>`. Two consequences:
+  - Keep `updated_at` at microsecond precision (`precision: 6`, the Rails 7+ default; on MySQL an older `datetime` column holds whole seconds, and two changes in one second can share a tag).
+  - Call `mark_updated!` after the change it reports has committed (an `after_commit` or a job). A row stamped inside a long transaction can commit with a time older than a tag already handed to a device, and that device would miss it until the next change.
+
+A transient push failure (timeout, 429, 5xx) is retried for the devices still owed a push only, up to `Passkit::PushUpdateJob::MAX_ATTEMPTS` times, then reported through `Rails.error`. A certificate or topic error (`Passkit::PushFatalError`) is reported and never retried. After `Passkit::Push::MAX_CONSECUTIVE_TIMEOUTS` unanswered pushes in a row, the rest of the batch is left for the retry.
 
 ## Debug issues 
 

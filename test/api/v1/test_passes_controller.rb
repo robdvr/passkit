@@ -329,6 +329,32 @@ class TestPassesController < ActionDispatch::IntegrationTest
   # If-Modified-Since boundary handling
   # ------------------------------------------------------------------
 
+  # Wallet polls every pass it holds; an unchanged pass answers 304 without
+  # rebuilding and re-signing it.
+  def test_show_304_does_not_rebuild_the_pass
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.last
+    Passkit::Generator.any_instance.expects(:generate_and_sign).never
+
+    get pass_path(pass_type_id: pass.pass_type_identifier, serial_number: pass.serial_number),
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}",
+                "If-Modified-Since" => pass.last_update.httpdate}
+    assert_response :not_modified
+  end
+
+  # A host retires a pass (e.g. the ticket moved to someone else) through
+  # BasePass#web_service_status; Wallet gets 410 and no pass body.
+  def test_show_answers_410_when_the_pass_is_gone
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.last
+    Passkit::ExampleStoreCard.any_instance.stubs(:web_service_status).returns(:gone)
+    Passkit::Generator.any_instance.expects(:generate_and_sign).never
+
+    get pass_path(pass_type_id: pass.pass_type_identifier, serial_number: pass.serial_number),
+      headers: {"Authorization" => "ApplePass #{pass.authentication_token}"}
+    assert_response :gone
+  end
+
   def test_show_returns_304_when_if_modified_since_equals_last_update
     # Boundary: controller compares with `>` so equal-to means "not modified".
     # Apple Wallet polls with the previously-served Last-Modified value, so an

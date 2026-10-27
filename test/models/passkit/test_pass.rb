@@ -17,6 +17,7 @@ class TestPasskitPass < ActiveSupport::TestCase
     :boarding_pass,
     :description,
     :expiration_date,
+    :featured_actions,
     :file_name,
     :foreground_color,
     :format_version,
@@ -32,14 +33,18 @@ class TestPasskitPass < ActiveSupport::TestCase
     :pass_path,
     :pass_type,
     :pass_type_identifier,
+    :poster_generic,
     :primary_fields,
     :relevant_date,
     :secondary_fields,
     :semantics,
     :sharing_prohibited,
+    :suppress_header_darkening,
     :suppress_strip_shine,
+    :upcoming_pass_information,
     :user_info,
     :voided,
+    :web_service_status,
     :web_service_url
   ].freeze
 
@@ -104,6 +109,12 @@ class TestPasskitPass < ActiveSupport::TestCase
     first = p.instance
     second = p.instance
     assert first.equal?(second), "Expected p.instance to be memoized (same object)"
+  end
+
+  def test_instance_knows_its_pass_row
+    p = Passkit::Pass.create!(klass: "Passkit::ExampleStoreCard", data: {"issued_to" => "a"})
+    assert_same p, p.instance.passkit_pass
+    assert_equal "a", p.instance.passkit_pass.data["issued_to"]
   end
 
   def test_instance_passes_generator_to_constructor

@@ -34,30 +34,47 @@ module Passkit
         # @return If the request is not authorized, returns HTTP status 401.
         # @return Otherwise, returns the appropriate standard HTTP status.
         def show
-          authentication_token = request.headers["Authorization"]&.split(" ")&.last
-          unless authentication_token.present?
-            render json: {}, status: :unauthorized
-            return
-          end
-
-          pass = Pass.find_by(serial_number: params[:serial_number], authentication_token: authentication_token)
+          pass = authenticated_pass
           unless pass
             render json: {}, status: :unauthorized
             return
           end
 
-          pass_output_path = Passkit::Generator.new(pass).generate_and_sign
-
-          response.headers["last-modified"] = pass.last_update.httpdate
-          modified_since = parse_time(request.headers["If-Modified-Since"])
-          if modified_since.nil? || pass.last_update.to_i > modified_since.to_i
-            send_file(pass_output_path, type: "application/vnd.apple.pkpass", disposition: "attachment")
-          else
-            head :not_modified
+          # A retired pass (the host decides, e.g. its ticket changed hands)
+          # gets 410 so Wallet stops asking for it.
+          if pass.web_service_status == :gone
+            head :gone
+            return
           end
+
+          last_update = pass.last_update
+          response.headers["last-modified"] = last_update.httpdate
+          modified_since = parse_time(request.headers["If-Modified-Since"])
+          # Wallet polls every pass it holds; answer an unchanged one before
+          # paying for a rebuild and a signature.
+          if modified_since && last_update.to_i <= modified_since.to_i
+            head :not_modified
+            return
+          end
+
+          pass_output_path = Passkit::Generator.new(pass).generate_and_sign
+          send_file(pass_output_path, type: "application/vnd.apple.pkpass", disposition: "attachment")
         end
 
         private
+
+        # Apple sends `Authorization: ApplePass <token>`. The token is compared
+        # in constant time so it cannot be guessed byte by byte.
+        def authenticated_pass
+          token = request.headers["Authorization"]&.split(" ")&.last
+          return nil if token.blank?
+
+          pass = Pass.find_by(serial_number: params[:serial_number])
+          return nil unless pass&.authentication_token.present?
+          return nil unless ActiveSupport::SecurityUtils.secure_compare(pass.authentication_token, token)
+
+          pass
+        end
 
         # Decrypt the URL payload, validate its shape, and check expiry.
         # Tampered, malformed, or expired payloads all 404 (not 500) so the

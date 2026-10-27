@@ -93,8 +93,8 @@ module PkpassHelpers
   FIELD_BLOCK_SUBKEYS = %w[headerFields primaryFields secondaryFields auxiliaryFields backFields].freeze
 
   # `enhanced_event_ticket: true` additionally asserts the iOS 18+ poster-style
-  # keys (`preferredStyleSchemes`, `eventLogoText`, `additionalInfoFields`,
-  # `relevantDates`) are present and well-shaped — used by the lifecycle test
+  # keys (`preferredStyleSchemes`, `nfc`, `eventLogoText`,
+  # `eventTicket.additionalInfoFields`, `relevantDates`) are present and well-shaped — used by the lifecycle test
   # for the upgraded UserTicket. Default `false` keeps existing call sites
   # working.
   def assert_valid_pass_json(pass_json, pass_type:, enhanced_event_ticket: false)
@@ -158,8 +158,11 @@ module PkpassHelpers
     raise "enhanced eventTicket: preferredStyleSchemes missing" unless pass_json["preferredStyleSchemes"].is_a?(Array)
     raise "enhanced eventTicket: preferredStyleSchemes must include 'posterEventTicket'" unless pass_json["preferredStyleSchemes"].include?("posterEventTicket")
     raise "enhanced eventTicket: eventLogoText missing or wrong type" unless pass_json["eventLogoText"].is_a?(String)
-    raise "enhanced eventTicket: additionalInfoFields must be non-empty Array" unless pass_json["additionalInfoFields"].is_a?(Array) && !pass_json["additionalInfoFields"].empty?
-    pass_json["additionalInfoFields"].each_with_index do |f, i|
+    raise "enhanced eventTicket: nfc required for the poster layout" unless pass_json["nfc"].is_a?(Hash)
+    raise "enhanced eventTicket: additionalInfoFields belongs in the eventTicket block" if pass_json.key?("additionalInfoFields")
+    info = pass_json.dig("eventTicket", "additionalInfoFields")
+    raise "enhanced eventTicket: eventTicket.additionalInfoFields must be non-empty Array" unless info.is_a?(Array) && !info.empty?
+    info.each_with_index do |f, i|
       raise "enhanced eventTicket: additionalInfoFields[#{i}].key/value required" unless f.is_a?(Hash) && f["key"].is_a?(String) && !f["value"].nil?
     end
     raise "enhanced eventTicket: relevantDates must be non-empty Array" unless pass_json["relevantDates"].is_a?(Array) && !pass_json["relevantDates"].empty?

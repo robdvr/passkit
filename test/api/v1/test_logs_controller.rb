@@ -42,4 +42,24 @@ class TestLogsController < ActionDispatch::IntegrationTest
     post log_url, params: {"logs" => ["only one"]}
     assert_equal "{}", response.body
   end
+
+  # The endpoint is unauthenticated (Apple's spec), so one request can only
+  # write a bounded amount: the first MAX_ENTRIES messages, each cut to
+  # MAX_LENGTH characters.
+  def test_create_bounds_what_one_request_can_store
+    max_entries = Passkit::Api::V1::LogsController::MAX_ENTRIES
+    max_length = Passkit::Api::V1::LogsController::MAX_LENGTH
+    logs = Array.new(max_entries + 5) { |i| "m#{i}" }
+    logs[0] = "x" * (max_length + 100)
+    post log_url, params: {logs: logs}.to_json, headers: {"Content-Type" => "application/json"}
+    assert_response :success
+    assert_equal max_entries, Passkit::Log.count
+    assert_equal max_length, Passkit::Log.order(:id).first.content.length
+  end
+
+  def test_create_ignores_non_string_entries
+    post log_url, params: {logs: ["ok", {"nested" => "x"}, 5]}.to_json, headers: {"Content-Type" => "application/json"}
+    assert_response :success
+    assert_equal ["ok", "5"], Passkit::Log.order(:id).pluck(:content)
+  end
 end

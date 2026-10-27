@@ -22,6 +22,10 @@ module Passkit
       generate_json_manifest
       sign_manifest
       compress_pass_file
+    ensure
+      # The unsigned work folder is one per generation and nothing reads it
+      # after the zip is written; only the .pkpass goes back to the caller.
+      FileUtils.rm_rf(@temporary_path) if @temporary_path
     end
 
     def self.compress_passes_files(files)
@@ -47,7 +51,9 @@ module Passkit
 
     def create_temporary_directory
       FileUtils.mkdir_p(TMP_FOLDER) unless File.directory?(TMP_FOLDER)
-      @temporary_path = TMP_FOLDER.join(@pass.file_name.to_s)
+      # Unique per generation, whatever `file_name` a host returns: two builds
+      # of one pass at once must never share (or clean up) a folder.
+      @temporary_path = TMP_FOLDER.join("#{@pass.file_name}-#{SecureRandom.hex(6)}")
 
       FileUtils.rm_rf(@temporary_path) if File.directory?(@temporary_path)
     end
@@ -77,6 +83,14 @@ module Passkit
         voided: @pass.voided,
         webServiceURL: @pass.web_service_url
       }
+
+      # No web service (the host has no https endpoint, e.g. in development):
+      # the pass is valid without updates, and the token has nothing to
+      # authenticate. A typed key set to null is refused by strict Wallets.
+      if @pass.web_service_url.blank?
+        pass.delete(:webServiceURL)
+        pass.delete(:authenticationToken)
+      end
 
       # Apple's spec marks `locations` and `logoText` as optional. Strict iOS
       # Wallet versions reject `null` for typed string fields and `[]` for
@@ -114,10 +128,14 @@ module Passkit
       # iOS 18+ enhanced (poster-style) event ticket fields. All optional;
       # omitted unless the subclass overrides the corresponding method.
       pass[:preferredStyleSchemes] = @pass.preferred_style_schemes if @pass.preferred_style_schemes
-      pass[:additionalInfoFields] = @pass.additional_info_fields unless @pass.additional_info_fields.empty?
       pass[:eventLogoText] = @pass.event_logo_text if @pass.event_logo_text
       pass[:useAutomaticColors] = @pass.use_automatic_colors unless @pass.use_automatic_colors.nil?
       pass[:footerBackgroundColor] = @pass.footer_background_color if @pass.footer_background_color
+      pass[:suppressHeaderDarkening] = @pass.suppress_header_darkening unless @pass.suppress_header_darkening.nil?
+      pass[:upcomingPassInformation] = @pass.upcoming_pass_information unless @pass.upcoming_pass_information.empty?
+
+      # iOS 27+: up to two action tiles under the pass, on every pass style.
+      pass[:featuredActions] = @pass.featured_actions unless @pass.featured_actions.empty?
 
       # Venue utility URLs (iOS 18+).
       pass[:bagPolicyURL] = @pass.bag_policy_url if @pass.bag_policy_url
@@ -135,19 +153,30 @@ module Passkit
       pass[:contactVenuePhoneNumber] = @pass.contact_venue_phone_number if @pass.contact_venue_phone_number
       pass[:contactVenueWebsite] = @pass.contact_venue_website if @pass.contact_venue_website
 
-      pass[@pass.pass_type] = {
+      style_block = {
         headerFields: @pass.header_fields,
         primaryFields: @pass.primary_fields,
         secondaryFields: @pass.secondary_fields,
         auxiliaryFields: @pass.auxiliary_fields,
         backFields: @pass.back_fields
       }
+      # Apple defines additionalInfoFields in PassFields, beside backFields.
+      # Wallet ignores the key at the top level of pass.json.
+      style_block[:additionalInfoFields] = @pass.additional_info_fields unless @pass.additional_info_fields.empty?
+      pass[@pass.pass_type] = style_block
+
+      # iOS 27+ poster style for generic-like passes. Wallet prefers it when
+      # present; the legacy style block above stays as the iOS 26 fallback.
+      pass[:posterGeneric] = @pass.poster_generic if @pass.poster_generic.present?
 
       if @pass.pass_type == :boardingPass && @pass.boarding_pass
         pass[:boardingPass] = pass[:boardingPass].merge(@pass.boarding_pass)
       end
 
-      Passkit::Validator.validate!(pass) if Passkit.configuration&.validate_pass_json
+      if Passkit.configuration&.validate_pass_json
+        files = pass_files.map { |file| file.relative_path_from(@temporary_path).to_s }
+        Passkit::Validator.validate!(pass, files: files)
+      end
 
       File.write(@temporary_path.join("pass.json"), pass.to_json)
     end
@@ -184,7 +213,7 @@ module Passkit
     # standard:enable Metrics/AbcSize
 
     def compress_pass_file
-      zip_path = TMP_FOLDER.join("#{@pass.file_name}.pkpass")
+      zip_path = TMP_FOLDER.join("#{@temporary_path.basename}.pkpass")
       File.open(zip_path, "wb") {} # ensure binary mode
 
       Zip::OutputStream.open(zip_path.to_s) do |z|

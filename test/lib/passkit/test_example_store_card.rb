@@ -38,7 +38,7 @@ class TestExampleStoreCard < ActiveSupport::TestCase
 
   def test_header_fields_includes_balance_field
     assert_equal(
-      [{key: "balance", label: "Balance", value: 100, currencyCode: "$"}],
+      [{key: "balance", label: "Balance", value: 100, currencyCode: "USD"}],
       @subject.header_fields
     )
   end

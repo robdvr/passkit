@@ -34,6 +34,7 @@ Gem::Specification.new do |spec|
   # spec.add_dependency "example-gem", "~> 1.0"
   spec.add_dependency "rails", ">= 8.0", "< 9.0"
   spec.add_dependency "rubyzip", ">= 2.3", "< 4.0"
+  spec.add_dependency "apnotic", ">= 1.7", "< 2"
   spec.add_development_dependency "sqlite3", ">= 2.0"
   spec.add_development_dependency "propshaft", ">= 1.0"
   spec.add_development_dependency "dotenv", ">= 3.0"

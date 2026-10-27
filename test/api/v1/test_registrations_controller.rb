@@ -140,9 +140,11 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
     assert_nil Passkit::Device.last.push_token
   end
 
-  def test_show_returns_404_when_device_unknown
+  # Apple's spec answers "no matching passes" with 204; a device we do not
+  # know (or removed with its last pass) has none.
+  def test_show_returns_204_when_device_unknown
     get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: "nonexistent-device")
-    assert_response :not_found
+    assert_response :no_content
   end
 
   def test_show_returns_204_when_device_has_no_passes
@@ -367,8 +369,61 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
     end
 
     assert_response :ok
-    assert captured_sql.any? { |s| s.match?(/passkit_passes.*updated_at\s*>=/i) },
-      "expected passesUpdatedSince to push the >= filter into SQL; SQL seen:\n#{captured_sql.inspect}"
+    assert captured_sql.any? { |s| s.match?(/passkit_passes.*updated_at\s*>/i) },
+      "expected passesUpdatedSince to push the updated_at filter into SQL; SQL seen:\n#{captured_sql.inspect}"
+  end
+
+  # lastUpdated is the tag Wallet sends back as passesUpdatedSince. It has to
+  # be the newest updated_at among the passes returned, not the clock: a pass
+  # written between the query and "now" would otherwise fall behind the tag
+  # and never be listed.
+  def test_show_lastUpdated_is_the_newest_returned_pass
+    travel_to Time.zone.parse("2026-05-03T15:00:00Z") do
+      Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+      pass = Passkit::Pass.first
+      register_pass(pass)
+      pass.update_columns(updated_at: Time.zone.parse("2026-05-03T14:00:00.250000Z"))
+
+      get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: 1)
+
+      assert_response :ok
+      assert_equal Time.zone.parse("2026-05-03T14:00:00.250000Z"), Time.zone.parse(JSON.parse(response.body)["lastUpdated"])
+    end
+  end
+
+  def test_pass_written_during_a_poll_is_listed_on_the_next_poll
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    first, second = Passkit::Pass.order(:id).to_a
+    [first, second].each { |p| register_pass(p) }
+    first.update_columns(updated_at: Time.zone.parse("2026-05-03T14:00:00.100000Z"))
+    second.update_columns(updated_at: Time.zone.parse("2026-05-03T13:00:00Z"))
+
+    get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: 1),
+      params: {passesUpdatedSince: "2026-05-03T13:30:00Z"}
+    tag = JSON.parse(response.body)["lastUpdated"]
+    assert_equal [first.serial_number], JSON.parse(response.body)["serialNumbers"]
+
+    # Committed by another process just after that query ran.
+    second.update_columns(updated_at: Time.zone.parse("2026-05-03T14:00:00.200000Z"))
+
+    get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: 1),
+      params: {passesUpdatedSince: tag}
+    assert_response :ok
+    assert_equal [second.serial_number], JSON.parse(response.body)["serialNumbers"]
+  end
+
+  def test_show_with_passesUpdatedSince_equal_to_the_tag_returns_204
+    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
+    pass = Passkit::Pass.first
+    register_pass(pass)
+
+    get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: 1)
+    tag = JSON.parse(response.body)["lastUpdated"]
+
+    get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: 1),
+      params: {passesUpdatedSince: tag}
+    assert_response :no_content
   end
 
   # ------------------------------------------------------------------

@@ -28,18 +28,20 @@ module Passkit
         # @return If there are no matching passes, returns HTTP status 204.
         # @return Otherwise, returns the appropriate standard HTTP status
         def show
+          # Apple's spec: no matching passes is 204, a device we do not know
+          # included (it unregistered its last pass, or never registered).
           if @device.nil?
-            render json: {}, status: :not_found
-            return
-          end
-
-          passes = fetch_registered_passes
-          if passes.none?
             render json: {}, status: :no_content
             return
           end
 
-          render json: updatable_passes(passes)
+          rows = fetch_registered_passes.pluck(:serial_number, :updated_at)
+          if rows.empty?
+            render json: {}, status: :no_content
+            return
+          end
+
+          render json: updatable_passes(rows)
         end
 
         # @return If disassociation succeeds, returns HTTP status 200.
@@ -60,8 +62,10 @@ module Passkit
             return
           end
 
-          @pass = Pass.find_by(serial_number: params[:serial_number], authentication_token: authentication_token)
-          unless @pass
+          @pass = Pass.find_by(serial_number: params[:serial_number])
+          unless @pass&.authentication_token.present? &&
+              ActiveSupport::SecurityUtils.secure_compare(@pass.authentication_token, authentication_token)
+            @pass = nil
             render json: {}, status: :unauthorized
           end
         end
@@ -110,13 +114,15 @@ module Passkit
           end
           return passes if since.nil?
 
-          passes.where("passkit_passes.updated_at >= ?", since)
+          passes.where("passkit_passes.updated_at > ?", since)
         end
 
-        def updatable_passes(passes)
-          # Round-trip back through `Time.zone.parse` next call requires an
-          # ISO 8601 string, not a Time instance.
-          {lastUpdated: Time.zone.now.iso8601, serialNumbers: passes.pluck(:serial_number)}
+        # `lastUpdated` comes back as the next passesUpdatedSince. It is the
+        # newest updated_at among the passes listed, to the microsecond, not
+        # the clock: a pass written between this query and "now" stays newer
+        # than the tag and is listed on the next poll.
+        def updatable_passes(rows)
+          {lastUpdated: rows.map(&:last).max.utc.iso8601(6), serialNumbers: rows.map(&:first)}
         end
 
         def push_token
