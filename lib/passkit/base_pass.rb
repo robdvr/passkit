@@ -48,6 +48,9 @@ module Passkit
       # :boardingPass
     end
 
+    # The PassKit web service Wallet asks for updates (https only). Return
+    # nil to issue passes that never update; the generator then omits both
+    # webServiceURL and authenticationToken.
     def web_service_url
       raise Error.new("Missing environment variable: PASSKIT_WEB_SERVICE_HOST") unless ENV["PASSKIT_WEB_SERVICE_HOST"]
       "#{ENV["PASSKIT_WEB_SERVICE_HOST"]}/passkit/api"

@@ -120,6 +120,16 @@ class TestGenerator < ActiveSupport::TestCase
     end
   end
 
+  # A pass without a web service (`web_service_url` nil, e.g. a host with no
+  # https endpoint in development) omits both keys: Apple requires https, and
+  # strict Wallet versions refuse a typed key set to null.
+  def test_pass_json_omits_the_web_service_when_there_is_none
+    path = with_subclass { define_method(:web_service_url) { nil } }
+    json = read_pass_json(path)
+    refute json.key?("webServiceURL")
+    refute json.key?("authenticationToken")
+  end
+
   # Apple's PassKit spec marks `locations` (optional array) and `logoText`
   # (optional String) as omit-when-empty. Strict iOS Wallet versions reject
   # passes containing `"locations": []` or `"logoText": null` — install

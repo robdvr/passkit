@@ -82,6 +82,14 @@ module Passkit
         webServiceURL: @pass.web_service_url
       }
 
+      # No web service (the host has no https endpoint, e.g. in development):
+      # the pass is valid without updates, and the token has nothing to
+      # authenticate. A typed key set to null is refused by strict Wallets.
+      if @pass.web_service_url.blank?
+        pass.delete(:webServiceURL)
+        pass.delete(:authenticationToken)
+      end
+
       # Apple's spec marks `locations` and `logoText` as optional. Strict iOS
       # Wallet versions reject `null` for typed string fields and `[]` for
       # optional array fields — the install silently fails on iPhone with no
