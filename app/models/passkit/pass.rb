@@ -85,7 +85,7 @@ module Passkit
     # subclasses is strongly recommended (an empty allowlist disables the
     # check for backward compatibility).
     def instance
-      @instance ||= klass.constantize.new(generator)
+      @instance ||= klass.constantize.new(generator).tap { |pass| pass.passkit_pass = self }
     end
 
     def last_update

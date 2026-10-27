@@ -1,5 +1,10 @@
 module Passkit
   class BasePass
+    # The Passkit::Pass row this pass is built for (set by Pass#instance), so a
+    # subclass can read what was recorded when it was issued (`data`) or when
+    # it last changed (`updated_at`). Nil for a pass built without a row.
+    attr_accessor :passkit_pass
+
     def initialize(generator = nil)
       @generator = generator
     end
