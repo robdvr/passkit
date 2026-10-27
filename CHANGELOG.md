@@ -1,3 +1,9 @@
+## [1.1.1] - 2026-10-27
+
+### Fixed
+
+- **Validator: featured action targets.** Each `featuredActions` type now needs the field Wallet's own validator requires: `place` a `placeIdentifier` (an Apple Maps place ID), `call` a `tel:` url, every other type an http(s) url. A `place` action with only a Maps URL added from a file, but every web service update of the pass logged "Received invalid pass data (The pass cannot be read because it isn't valid.)", which Apple says will become an error. The dummy membership card's `place` action carries a place ID.
+
 ## [1.1.0] - 2026-10-27
 
 Brought in line with Apple's own pass model and validators (github.com/apple/pass-builder, WWDC26) and the iOS 27 additions.

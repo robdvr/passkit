@@ -262,7 +262,9 @@ module Passkit
 
     # iOS 27+ featured actions: up to two tiles Wallet shows under the pass,
     # on every pass style. Each entry is `{identifier:, type:, url:}`, where
-    # `type` is one of Passkit::Validator::FEATURED_ACTION_TYPES.
+    # `type` is one of Passkit::Validator::FEATURED_ACTION_TYPES and `url` is
+    # http(s), except `call` (a `tel:` url) and `place`, which takes
+    # `placeIdentifier:` (an Apple Maps place ID) in place of a url.
     def featured_actions
       []
     end

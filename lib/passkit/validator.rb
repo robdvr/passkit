@@ -511,15 +511,47 @@ module Passkit
             errors << "#{label}.identifier is required"
           end
           type = fetch(action, :type)
-          unless FEATURED_ACTION_TYPES.include?(type)
+          if FEATURED_ACTION_TYPES.include?(type)
+            validate_featured_action_target(action, type, label, errors)
+          else
             errors << "#{label}.type must be one of #{FEATURED_ACTION_TYPES.join(", ")} — got #{type.inspect}"
-          end
-          url = fetch(action, :url)
-          if url && !absolute_url?(url)
-            errors << "#{label}.url must be an absolute URL — got #{url.inspect}"
           end
         end
         errors << "featuredActions identifiers must be unique" if identifiers.uniq.size != identifiers.size
+      end
+
+      # What Wallet's own validator requires of each type (checked against
+      # PassKit on iOS 27 / macOS 27). An action missing its field still adds
+      # from a file, but a web service update of the pass logs "Received
+      # invalid pass data", which Apple says will become an error:
+      # - place: `placeIdentifier`, an Apple Maps place ID. A Maps URL is not
+      #   enough.
+      # - call: a `tel:` url.
+      # - every other type: an http(s) url.
+      def validate_featured_action_target(action, type, label, errors)
+        url = fetch(action, :url)
+        case type
+        when "place"
+          place_id = fetch(action, :placeIdentifier)
+          unless place_id.is_a?(String) && !place_id.strip.empty?
+            errors << "#{label}.placeIdentifier (an Apple Maps place ID) is required for type place"
+          end
+          if url && !absolute_url?(url)
+            errors << "#{label}.url must be an absolute URL — got #{url.inspect}"
+          end
+        when "call"
+          unless url_with_scheme?(url, %w[tel])
+            errors << "#{label}.url must be a tel: URL for type call — got #{url.inspect}"
+          end
+        else
+          unless url_with_scheme?(url, %w[http https])
+            errors << "#{label}.url must be an http(s) URL for type #{type} — got #{url.inspect}"
+          end
+        end
+      end
+
+      def url_with_scheme?(value, schemes)
+        absolute_url?(value) && schemes.include?(URI.parse(value).scheme.downcase)
       end
 
       def absolute_url?(value)
