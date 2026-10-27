@@ -96,7 +96,8 @@ class TestPush < ActiveSupport::TestCase
   end
 
   # A timeout, throttling or an APNs outage is worth retrying; the error is
-  # raised after every other device was tried, so the job retries.
+  # raised after every other device was tried and names only the devices
+  # still owed a push, so a retry reaches those alone.
   [:timeout, "429", "500", "503"].each do |status|
     define_method(:"test_raises_after_the_batch_on_a_transient_#{status}") do
       pass = pass_with_devices("flaky", "fine")
@@ -104,19 +105,40 @@ class TestPush < ActiveSupport::TestCase
       error = assert_raises(Passkit::PushError) { Passkit::Push.new(connection: connection).call([pass.id]) }
 
       assert_includes error.message, "1 of 2"
+      assert_equal [Passkit::Device.find_by!(push_token: "flaky").id], error.failed_device_ids
       assert_equal %w[fine flaky], connection.pushed.map(&:token).sort, "every device is still tried"
       assert Passkit::Device.exists?(push_token: "flaky"), "a transient failure never removes a device"
     end
   end
 
+  def test_a_retry_reaches_only_the_devices_still_owed_a_push
+    pass = pass_with_devices("done", "owed")
+    connection = FakeConnection.new
+    Passkit::Push.new(connection: connection).call([pass.id], device_ids: [Passkit::Device.find_by!(push_token: "owed").id])
+    assert_equal ["owed"], connection.pushed.map(&:token)
+  end
+
+  # APNs that stops answering would hold a worker for every device's
+  # timeout; after a few in a row the rest of the batch is owed instead.
+  def test_stops_trying_once_apns_stops_answering
+    tokens = Array.new(6) { |i| "t#{i}" }
+    pass = pass_with_devices(*tokens)
+    connection = FakeConnection.new(Hash.new([:timeout].freeze))
+    error = assert_raises(Passkit::PushError) { Passkit::Push.new(connection: connection).call([pass.id]) }
+
+    assert_equal Passkit::Push::MAX_CONSECUTIVE_TIMEOUTS, connection.pushed.size
+    assert_equal 6, error.failed_device_ids.size
+  end
+
   # A bad certificate or topic fails every push the same way: stop at once
-  # with APNs' reason instead of spending the batch.
+  # with APNs' reason instead of spending the batch, and never retry.
   def test_stops_at_the_first_certificate_or_topic_error
     pass = pass_with_devices("a", "b", "c")
     connection = FakeConnection.new(Hash.new(["403", "BadCertificate"].freeze))
-    error = assert_raises(Passkit::PushError) { Passkit::Push.new(connection: connection).call([pass.id]) }
+    error = assert_raises(Passkit::PushFatalError) { Passkit::Push.new(connection: connection).call([pass.id]) }
 
     assert_includes error.message, "BadCertificate"
+    refute_kind_of Passkit::PushError, error
     assert_equal 1, connection.pushed.size
     assert_equal 3, Passkit::Device.count
     assert connection.closed
@@ -187,8 +209,33 @@ class TestPush < ActiveSupport::TestCase
 
   def test_job_sends_the_push
     pass = pass_with_devices("t")
-    Passkit::Push.any_instance.expects(:call).with([pass.id]).returns(Passkit::Push::Result.new(sent: 1, removed: 0))
+    Passkit::Push.any_instance.expects(:call).with([pass.id], device_ids: nil).returns(Passkit::Push::Result.new(sent: 1, removed: 0))
     with_push_enabled(true) { Passkit::PushUpdateJob.perform_now([pass.id]) }
+  end
+
+  def test_job_retries_only_the_devices_still_owed_a_push
+    Passkit::Push.any_instance.stubs(:call).raises(Passkit::PushError.new("1 of 2 failed", failed_device_ids: [7]))
+    with_push_enabled(true) do
+      assert_enqueued_with(job: Passkit::PushUpdateJob, args: [[1], [7], 2]) { Passkit::PushUpdateJob.perform_now([1]) }
+    end
+  end
+
+  def test_job_reports_and_stops_after_the_last_attempt
+    Passkit::Push.any_instance.stubs(:call).raises(Passkit::PushError.new("still failing", failed_device_ids: [7]))
+    Rails.error.expects(:report).with(instance_of(Passkit::PushError), handled: true)
+    with_push_enabled(true) do
+      assert_no_enqueued_jobs(only: Passkit::PushUpdateJob) do
+        Passkit::PushUpdateJob.perform_now([1], [7], Passkit::PushUpdateJob::MAX_ATTEMPTS)
+      end
+    end
+  end
+
+  def test_job_reports_a_fatal_error_and_never_retries_it
+    Passkit::Push.any_instance.stubs(:call).raises(Passkit::PushFatalError, "BadCertificate")
+    Rails.error.expects(:report).with(instance_of(Passkit::PushFatalError), handled: true)
+    with_push_enabled(true) do
+      assert_no_enqueued_jobs(only: Passkit::PushUpdateJob) { Passkit::PushUpdateJob.perform_now([1]) }
+    end
   end
 
   def test_job_does_nothing_when_push_is_switched_off_after_enqueue

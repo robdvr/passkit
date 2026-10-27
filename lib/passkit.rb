@@ -13,7 +13,20 @@ module Passkit
 
   class ValidationError < Error; end
 
-  class PushError < Error; end
+  # A pass update push that may succeed later (timeout, 429, 5xx), naming the
+  # devices still owed one so a retry reaches only those.
+  class PushError < Error
+    attr_reader :failed_device_ids
+
+    def initialize(message = nil, failed_device_ids: [])
+      super(message)
+      @failed_device_ids = failed_device_ids
+    end
+  end
+
+  # APNs refused the request itself (certificate, topic, payload): every push
+  # would fail the same way, so it is not retried.
+  class PushFatalError < Error; end
 
   class << self
     attr_accessor :configuration

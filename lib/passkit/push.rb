@@ -9,16 +9,20 @@ module Passkit
   # which serials changed and fetches each one.
   #
   # A device whose token APNs rejects is removed, as Apple asks. Transient
-  # failures (timeouts, 429, 5xx) are counted and raised as a PushError once
-  # every device was tried, so a job can retry; a certificate or topic error
-  # stops at once, because every push would fail the same way.
+  # failures (timeouts, 429, 5xx) are raised as a PushError naming the devices
+  # still owed a push, once every device was tried, so a retry reaches only
+  # those; after MAX_CONSECUTIVE_TIMEOUTS unanswered pushes in a row APNs is
+  # treated as unreachable and the rest of the batch is owed too. A
+  # certificate or topic error raises PushFatalError at once, because every
+  # push would fail the same way.
   class Push
     PRODUCTION_URL = "https://api.push.apple.com:443"
     EMPTY_PAYLOAD = "{}"
     # APNs reasons that mean the token itself is dead.
     INVALID_TOKEN_REASONS = %w[BadDeviceToken DeviceTokenNotForTopic Unregistered ExpiredToken].freeze
     TRANSIENT_STATUSES = %w[429 500 503].freeze
-    TIMEOUT_SECONDS = 15
+    TIMEOUT_SECONDS = 10
+    MAX_CONSECUTIVE_TIMEOUTS = 3
 
     Result = Struct.new(:sent, :removed)
 
@@ -39,36 +43,47 @@ module Passkit
       @connection = connection
     end
 
-    def call(pass_ids)
+    # `device_ids` narrows a retry to the devices a previous attempt still
+    # owed a push.
+    def call(pass_ids, device_ids: nil)
       devices = Passkit::Device
         .where(id: Passkit::Registration.where(passkit_pass_id: pass_ids).select(:passkit_device_id))
         .where.not(push_token: [nil, ""])
-        .to_a
+      devices = devices.where(id: device_ids) if device_ids
+      devices = devices.to_a
       return Result.new(sent: 0, removed: 0) if devices.empty?
 
       sent = 0
       removed = 0
-      transient = []
+      failed = {}
+      timeouts_in_a_row = 0
       connection = @connection || build_connection
       begin
-        devices.each do |device|
+        devices.each_with_index do |device, index|
           response = connection.push(notification_for(device), timeout: TIMEOUT_SECONDS)
+          timeouts_in_a_row = response.nil? ? timeouts_in_a_row + 1 : 0
           case outcome(response)
           when :sent then sent += 1
           when :invalid_token
             remove(device)
             removed += 1
-          when :transient then transient << describe(response)
+          when :transient
+            failed[device.id] = describe(response)
+            if timeouts_in_a_row >= MAX_CONSECUTIVE_TIMEOUTS
+              devices.drop(index + 1).each { |rest| failed[rest.id] = "not tried: APNs stopped answering" }
+              break
+            end
           else
-            raise PushError, "APNs refused the pass update push: #{describe(response)}"
+            raise PushFatalError, "APNs refused the pass update push: #{describe(response)}"
           end
         end
       ensure
         connection.close
       end
 
-      if transient.any?
-        raise PushError, "#{transient.size} of #{devices.size} pass update pushes failed: #{transient.uniq.join(", ")}"
+      if failed.any?
+        raise PushError.new("#{failed.size} of #{devices.size} pass update pushes failed: #{failed.values.uniq.join(", ")}",
+          failed_device_ids: failed.keys)
       end
 
       Result.new(sent: sent, removed: removed)

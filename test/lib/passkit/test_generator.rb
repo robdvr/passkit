@@ -899,7 +899,22 @@ class TestGenerator < ActiveSupport::TestCase
     generator = Passkit::Generator.new(pass)
     path = generator.generate_and_sign
     assert File.exist?(path)
-    refute File.exist?(Passkit::Generator::TMP_FOLDER.join(pass.file_name.to_s)), "work folder should be removed"
+    assert_empty Dir.glob(Passkit::Generator::TMP_FOLDER.join("#{pass.file_name}-*")).select { |f| File.directory?(f) },
+      "work folder should be removed"
+  end
+
+  # A host may return a fixed file_name; two builds of one pass at once must
+  # still get their own work folder and their own .pkpass.
+  def test_two_builds_with_the_same_file_name_do_not_share_a_folder
+    path_to_assets = example_pass_path
+    klass = make_pass_subclass do
+      define_method(:pass_path) { path_to_assets }
+      define_method(:file_name) { "fixed-name" }
+    end
+    first = Passkit::Factory.create_pass(klass)
+    second = Passkit::Factory.create_pass(klass)
+    refute_equal first.to_s, second.to_s
+    [first, second].each { |path| PkpassHelpers.verify_pkpass_signature!(PkpassHelpers.read_pkpass(path)) }
   end
 
   def test_pass_json_includes_eventLogoText_when_set

@@ -35,13 +35,13 @@ module Passkit
             return
           end
 
-          passes = fetch_registered_passes
-          unless passes.exists?
+          rows = fetch_registered_passes.pluck(:serial_number, :updated_at)
+          if rows.empty?
             render json: {}, status: :no_content
             return
           end
 
-          render json: updatable_passes(passes)
+          render json: updatable_passes(rows)
         end
 
         # @return If disassociation succeeds, returns HTTP status 200.
@@ -49,11 +49,7 @@ module Passkit
         # @return Otherwise, returns the appropriate standard HTTP status.
         def destroy
           device = Passkit::Device.find_by(identifier: params[:device_id])
-          if device
-            @pass.registrations.where(device: device).delete_all
-            # A device with no pass left has nothing to be told about.
-            device.destroy unless device.registrations.exists?
-          end
+          @pass.registrations.where(device: device).delete_all if device
           render json: {}, status: :ok
         end
 
@@ -125,8 +121,7 @@ module Passkit
         # newest updated_at among the passes listed, to the microsecond, not
         # the clock: a pass written between this query and "now" stays newer
         # than the tag and is listed on the next poll.
-        def updatable_passes(passes)
-          rows = passes.pluck(:serial_number, :updated_at)
+        def updatable_passes(rows)
           {lastUpdated: rows.map(&:last).max.utc.iso8601(6), serialNumbers: rows.map(&:first)}
         end
 

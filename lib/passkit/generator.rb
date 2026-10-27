@@ -51,7 +51,9 @@ module Passkit
 
     def create_temporary_directory
       FileUtils.mkdir_p(TMP_FOLDER) unless File.directory?(TMP_FOLDER)
-      @temporary_path = TMP_FOLDER.join(@pass.file_name.to_s)
+      # Unique per generation, whatever `file_name` a host returns: two builds
+      # of one pass at once must never share (or clean up) a folder.
+      @temporary_path = TMP_FOLDER.join("#{@pass.file_name}-#{SecureRandom.hex(6)}")
 
       FileUtils.rm_rf(@temporary_path) if File.directory?(@temporary_path)
     end
@@ -211,7 +213,7 @@ module Passkit
     # standard:enable Metrics/AbcSize
 
     def compress_pass_file
-      zip_path = TMP_FOLDER.join("#{@pass.file_name}.pkpass")
+      zip_path = TMP_FOLDER.join("#{@temporary_path.basename}.pkpass")
       File.open(zip_path, "wb") {} # ensure binary mode
 
       Zip::OutputStream.open(zip_path.to_s) do |z|

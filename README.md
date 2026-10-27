@@ -430,6 +430,15 @@ end
 
 Pushes need nothing beyond the signing certificate already configured. Keep `push_enabled` off in test, CI and development.
 
+Two things to know before turning it on:
+
+- **`config.push_type`** (`apns-push-type`) defaults to `"alert"`, apnotic's default. Apple documents the certificate, topic and empty payload of a pass update push, but not this header. Confirm an update lands on a real device before relying on it in production.
+- **Timestamp cursors.** The changed-serials tag is the newest `passkit_passes.updated_at` listed, filtered with `>`. Two consequences:
+  - Keep `updated_at` at microsecond precision (`precision: 6`, the Rails 7+ default; on MySQL an older `datetime` column holds whole seconds, and two changes in one second can share a tag).
+  - Call `mark_updated!` after the change it reports has committed (an `after_commit` or a job). A row stamped inside a long transaction can commit with a time older than a tag already handed to a device, and that device would miss it until the next change.
+
+A transient push failure (timeout, 429, 5xx) is retried for the devices still owed a push only, up to `Passkit::PushUpdateJob::MAX_ATTEMPTS` times, then reported through `Rails.error`. A certificate or topic error (`Passkit::PushFatalError`) is reported and never retried. After `Passkit::Push::MAX_CONSECUTIVE_TIMEOUTS` unanswered pushes in a row, the rest of the batch is left for the retry.
+
 ## Debug issues 
 
 * On Mac, you can open the *.pkpass files with "Pass Viewer". Open the `Console.app` to log possible error messages and filter by "Pass Viewer" process.

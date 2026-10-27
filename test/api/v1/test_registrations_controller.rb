@@ -202,7 +202,7 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
     assert_equal 0, pass.devices.count
     assert_equal 0, Passkit::Registration.count
     assert_equal 1, Passkit::Pass.count
-    assert_equal 0, Passkit::Device.count, "a device left with no pass is removed"
+    assert_equal 1, Passkit::Device.count
   end
 
   def test_destroy_without_auth_returns_401
@@ -424,21 +424,6 @@ class TestRegistrationsController < ActionDispatch::IntegrationTest
     get device_registrations_path(pass_type_id: ENV["PASSKIT_PASS_TYPE_IDENTIFIER"], device_id: 1),
       params: {passesUpdatedSince: tag}
     assert_response :no_content
-  end
-
-  # A device whose last pass is removed has nothing left to update.
-  def test_destroy_removes_a_device_left_without_registrations
-    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
-    Passkit::Factory.create_pass(Passkit::ExampleStoreCard)
-    first, second = Passkit::Pass.order(:id).to_a
-    register_pass(first)
-    register_pass(second)
-
-    destroy_registration(first.registrations.first)
-    assert_equal 1, Passkit::Device.count, "the device still holds the second pass"
-
-    destroy_registration(second.registrations.first)
-    assert_equal 0, Passkit::Device.count
   end
 
   # ------------------------------------------------------------------

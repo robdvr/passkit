@@ -10,9 +10,11 @@ module Passkit
 
         def create
           messages = Array(params[:logs]).select { |m| m.is_a?(String) || m.is_a?(Numeric) }
-          messages.first(MAX_ENTRIES).each do |message|
-            Log.create!(content: message.to_s.truncate(MAX_LENGTH, omission: ""))
+          now = Time.current
+          rows = messages.first(MAX_ENTRIES).map do |message|
+            {content: message.to_s.truncate(MAX_LENGTH, omission: ""), created_at: now, updated_at: now}
           end
+          Log.insert_all(rows) if rows.any?
           render json: {}, status: :ok
         end
       end
