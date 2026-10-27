@@ -8,7 +8,8 @@ class CreatePasskitTables < ActiveRecord::Migration[<%= ActiveRecord::Migration.
       t.string :authentication_token
       t.json :data
       t.integer :version
-      t.timestamps null: false
+      # Microseconds: the changed-serials tag is the newest updated_at listed.
+      t.timestamps null: false, precision: 6
       t.index [:generator_type, :generator_id], name: 'index_passkit_passes_on_generator'
       t.index :serial_number, unique: true
     end
