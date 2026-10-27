@@ -874,6 +874,7 @@ class TestGenerator < ActiveSupport::TestCase
     assert_equal %w[member_name], json["posterGeneric"]["primaryFields"].map { |f| f["key"] }
     assert_equal %w[member_name], json["generic"]["primaryFields"].map { |f| f["key"] }
     assert_equal %w[membershipBenefits place], json["featuredActions"].map { |a| a["type"] }
+    assert_equal "I63802885C8189B2B", json["featuredActions"].last["placeIdentifier"]
   end
 
   def test_pass_json_omits_posterGeneric_when_nil

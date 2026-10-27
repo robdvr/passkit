@@ -799,6 +799,9 @@ class TestValidator < ActiveSupport::TestCase
     [[{identifier: "a", type: "shop", url: "eventrise://shop"}], "featuredActions[0].url must be an http(s) URL"],
     [[{identifier: "a", type: "viewSchedule"}], "featuredActions[0].url must be an http(s) URL"],
     [[{identifier: "a", type: "shop", url: "not a url"}], "featuredActions[0].url must be an http(s) URL"],
+    [[{identifier: "a", type: "shop", url: "https:example.com"}], "featuredActions[0].url must be an http(s) URL"],
+    [[{identifier: "a", type: "call", url: "tel:"}], "featuredActions[0].url must be a tel: URL"],
+    [[{identifier: "a", type: "place", placeIdentifier: "I63802885C8189B2B", url: "not a url"}], "featuredActions[0].url must be an absolute URL"],
     [[{identifier: "a", type: "call", url: "tel:1"}, {identifier: "a", type: "shop", url: "https://x.test"}], "featuredActions identifiers must be unique"],
     [Array.new(3) { |n| {identifier: "a#{n}", type: "shop", url: "https://x.test"} }, "featuredActions holds at most 2"],
     [{identifier: "a", type: "shop"}, "featuredActions must be an Array"]

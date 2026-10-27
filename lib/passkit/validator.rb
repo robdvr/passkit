@@ -550,8 +550,11 @@ module Passkit
         end
       end
 
+      # http(s) also needs a host: `https:example.com` parses, but is no link.
       def url_with_scheme?(value, schemes)
-        absolute_url?(value) && schemes.include?(URI.parse(value).scheme.downcase)
+        return false unless absolute_url?(value)
+        uri = URI.parse(value)
+        schemes.include?(uri.scheme.downcase) && (uri.scheme.casecmp?("tel") || uri.host.present?)
       end
 
       def absolute_url?(value)
