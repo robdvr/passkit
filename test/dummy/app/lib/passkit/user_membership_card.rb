@@ -51,7 +51,7 @@ module Passkit
     def featured_actions
       [
         {identifier: "benefits", type: "membershipBenefits", url: "https://example.com/benefits"},
-        {identifier: "visit", type: "place", url: "https://maps.apple.com/?q=Passkit%20Club"}
+        {identifier: "visit", type: "place", placeIdentifier: "I63802885C8189B2B"}
       ]
     end
 

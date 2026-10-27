@@ -322,6 +322,8 @@ The bundled [`Passkit::UserTicket`](test/dummy/app/lib/passkit/user_ticket.rb) i
 
 `featured_actions` adds up to two tiles under any pass, each `{identifier:, type:, url:}` with one of Apple's 14 types (`Passkit::Validator::FEATURED_ACTION_TYPES`: `viewSchedule`, `watchTrailer`, `listenToMusic`, `call`, `place`, `addToBalance`, `order`, `shop`, `membershipBenefits`, `bookAppointment`, `bookCar`, `bookFlight`, `bookStay`, `viewOffersRewards`).
 
+Each type needs its own target, the same rule Wallet's validator applies: an http(s) `url` for every type except `call`, which takes a `tel:` url, and `place`, which takes `placeIdentifier:` (an Apple Maps place ID; a Maps URL is not accepted). A pass with an action that misses its target still adds from a file, but when Wallet fetches it from your web service it logs "Received invalid pass data", which Apple says will become an error. `Passkit::Validator` refuses such a pass.
+
 `poster_generic` returns a PassFields hash for the iOS 27 Poster Generic style (`headerFields`, up to four `primaryFields`, `footerFields`, `backFields`, `additionalInfoFields`). Wallet prefers it; the regular `pass_type` block (e.g. `:generic`) is still written for iOS 26 and earlier, so populate both. [`Passkit::UserMembershipCard`](test/dummy/app/lib/passkit/user_membership_card.rb) is a complete example.
 
 iOS 27 also adds the barcode formats `PKBarcodeFormatCode39`, `PKBarcodeFormatCodabar`, `PKBarcodeFormatEAN13` and `PKBarcodeFormatI2of5`. Earlier versions show no barcode for them, so list an older format after one.

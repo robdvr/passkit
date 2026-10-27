@@ -773,10 +773,19 @@ class TestValidator < ActiveSupport::TestCase
 
   # ---- featuredActions (iOS 27) ----
 
-  def test_featured_actions_accept_apple_types
+  # The shapes Wallet's own validator accepts: every type but call and place
+  # with an http(s) url, call with a tel: url, place with a placeIdentifier.
+  (Passkit::Validator::FEATURED_ACTION_TYPES - %w[call place]).each do |type|
+    define_method(:"test_featured_action_#{type}_accepts_an_http_url") do
+      actions = [{identifier: "a", type: type, url: "https://example.com/#{type}"}]
+      assert_empty Passkit::Validator.validate(base_pass.merge(featuredActions: actions))
+    end
+  end
+
+  def test_featured_actions_accept_call_with_tel_and_place_with_a_place_id
     actions = [
-      {identifier: "agenda", type: "viewSchedule", url: "https://example.com/agenda"},
-      {identifier: "map", type: "place", url: "https://maps.apple.com/?q=Hall"}
+      {identifier: "phone", type: "call", url: "tel:+15555550100"},
+      {identifier: "map", type: "place", placeIdentifier: "I63802885C8189B2B"}
     ]
     assert_empty Passkit::Validator.validate(base_pass.merge(featuredActions: actions))
   end
@@ -784,8 +793,16 @@ class TestValidator < ActiveSupport::TestCase
   [
     [[{identifier: "a", type: "bogus", url: "https://x.test"}], "featuredActions[0].type must be one of"],
     [[{type: "call", url: "tel:+15555550100"}], "featuredActions[0].identifier is required"],
-    [[{identifier: "a", type: "call", url: "not a url"}], "featuredActions[0].url must be an absolute URL"],
-    [[{identifier: "a", type: "call"}, {identifier: "a", type: "place"}], "featuredActions identifiers must be unique"],
+    # Wallet rejects these three (iOS 27 "not a valid featured action").
+    [[{identifier: "a", type: "place", url: "https://maps.apple.com/?q=Hall"}], "featuredActions[0].placeIdentifier (an Apple Maps place ID) is required"],
+    [[{identifier: "a", type: "call", url: "https://x.test"}], "featuredActions[0].url must be a tel: URL"],
+    [[{identifier: "a", type: "shop", url: "eventrise://shop"}], "featuredActions[0].url must be an http(s) URL"],
+    [[{identifier: "a", type: "viewSchedule"}], "featuredActions[0].url must be an http(s) URL"],
+    [[{identifier: "a", type: "shop", url: "not a url"}], "featuredActions[0].url must be an http(s) URL"],
+    [[{identifier: "a", type: "shop", url: "https:example.com"}], "featuredActions[0].url must be an http(s) URL"],
+    [[{identifier: "a", type: "call", url: "tel:"}], "featuredActions[0].url must be a tel: URL"],
+    [[{identifier: "a", type: "place", placeIdentifier: "I63802885C8189B2B", url: "not a url"}], "featuredActions[0].url must be an absolute URL"],
+    [[{identifier: "a", type: "call", url: "tel:1"}, {identifier: "a", type: "shop", url: "https://x.test"}], "featuredActions identifiers must be unique"],
     [Array.new(3) { |n| {identifier: "a#{n}", type: "shop", url: "https://x.test"} }, "featuredActions holds at most 2"],
     [{identifier: "a", type: "shop"}, "featuredActions must be an Array"]
   ].each_with_index do |(actions, error), i|
